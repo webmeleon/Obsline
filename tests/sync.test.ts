@@ -43,6 +43,7 @@ describe('SyncEngine', () => {
 
     const mockClientInstance = {
       listDocuments: jest.fn().mockResolvedValue([]),
+      listCollections: jest.fn().mockResolvedValue([]),
       getDocument: jest.fn(),
       createDocument: jest.fn(),
       updateDocument: jest.fn(),
@@ -90,12 +91,14 @@ describe('SyncEngine', () => {
       title: 'test',
       text: 'Test content',
       updatedAt: new Date().toISOString(),
+      collectionId: 'default',
+      parentDocumentId: null,
     });
 
     const result = await syncEngine.sync();
 
     expect(result.created).toBe(1);
-    expect(mockClientInstance.createDocument).toHaveBeenCalledWith('test', 'Test content');
+    expect(mockClientInstance.createDocument).toHaveBeenCalledWith('test', 'Test content', '', undefined);
   });
 
   test('should handle sync errors gracefully', async () => {

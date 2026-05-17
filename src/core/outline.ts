@@ -3,20 +3,47 @@ import { Logger } from '../utils/logger';
 
 const logger = new Logger('OutlineClient');
 
+export interface OutlineCollection {
+  id: string;
+  name: string;
+  description: string | null;
+}
+
 export interface OutlineDocument {
   id: string;
   title: string;
   text: string;
   updatedAt: string;
   createdAt?: string;
+  collectionId: string;
+  parentDocumentId: string | null;
 }
 
 interface OutlineListResponse {
-  data: Array<{ id: string; title: string; updatedAt: string; createdAt: string }>;
+  data: Array<{
+    id: string;
+    title: string;
+    updatedAt: string;
+    createdAt: string;
+    collectionId: string;
+    parentDocumentId: string | null;
+  }>;
 }
 
 interface OutlineDocResponse {
-  data: { id: string; title: string; text: string; updatedAt: string; createdAt: string };
+  data: {
+    id: string;
+    title: string;
+    text: string;
+    updatedAt: string;
+    createdAt: string;
+    collectionId: string;
+    parentDocumentId: string | null;
+  };
+}
+
+interface OutlineCollectionsResponse {
+  data: Array<{ id: string; name: string; description: string | null }>;
 }
 
 export class OutlineClient {
@@ -62,6 +89,8 @@ export class OutlineClient {
         text: '',
         updatedAt: doc.updatedAt,
         createdAt: doc.createdAt,
+        collectionId: doc.collectionId,
+        parentDocumentId: doc.parentDocumentId,
       }));
     } catch (error) {
       logger.error(`Failed to list documents: ${error instanceof Error ? error.message : String(error)}`);
@@ -85,7 +114,8 @@ export class OutlineClient {
   async createDocument(
     title: string,
     text: string,
-    collectionId?: string
+    collectionId?: string,
+    parentDocumentId?: string
   ): Promise<OutlineDocument> {
     try {
       const payload: Record<string, unknown> = {
@@ -94,6 +124,9 @@ export class OutlineClient {
       };
       if (collectionId) {
         payload.collectionId = collectionId;
+      }
+      if (parentDocumentId) {
+        payload.parentDocumentId = parentDocumentId;
       }
 
       const response = await this.client.post<OutlineDocResponse>('/documents.create', payload);
@@ -107,12 +140,13 @@ export class OutlineClient {
     }
   }
 
-  async updateDocument(id: string, text: string): Promise<OutlineDocument> {
+  async updateDocument(id: string, text: string, title?: string): Promise<OutlineDocument> {
     try {
-      const response = await this.client.post<OutlineDocResponse>('/documents.update', {
-        id,
-        text,
-      });
+      const payload: Record<string, unknown> = { id, text };
+      if (title) {
+        payload.title = title;
+      }
+      const response = await this.client.post<OutlineDocResponse>('/documents.update', payload);
       logger.info(`Updated document: ${response.data.data.title}`);
       return response.data.data;
     } catch (error) {
@@ -131,6 +165,17 @@ export class OutlineClient {
       logger.error(
         `Failed to delete document ${id}: ${error instanceof Error ? error.message : String(error)}`
       );
+      throw error;
+    }
+  }
+
+  async listCollections(): Promise<OutlineCollection[]> {
+    try {
+      const response = await this.client.post<OutlineCollectionsResponse>('/collections.list', {});
+      logger.debug(`Listed ${response.data.data.length} collections`);
+      return response.data.data;
+    } catch (error) {
+      logger.error(`Failed to list collections: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     }
   }

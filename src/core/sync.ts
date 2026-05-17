@@ -2,7 +2,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs-extra';
 import * as path from 'path';
 import { ObsidianReader, ObsidianNote } from './obsidian';
-import { OutlineClient, OutlineDocument } from './outline';
+import { OutlineClient, OutlineDocument, OutlineCollection } from './outline';
 import { ObslineConfig } from '../utils/config';
 import { Logger } from '../utils/logger';
 
@@ -43,12 +43,13 @@ export class SyncEngine {
     try {
       await this.loadSyncState();
 
-      const [obsidianNotes, outlineDocuments] = await Promise.all([
+      const [obsidianNotes, outlineDocuments, collections] = await Promise.all([
         this.obsidianReader.readVault(),
         this.outlineClient.listDocuments(),
+        this.outlineClient.listCollections(),
       ]);
 
-      const result = await this.syncBidirectional(obsidianNotes, outlineDocuments);
+      const result = await this.syncBidirectional(obsidianNotes, outlineDocuments, collections);
 
       await this.saveSyncState();
       this.syncState.lastSyncTime = startTime;
@@ -67,31 +68,36 @@ export class SyncEngine {
 
   private async syncBidirectional(
     obsidianNotes: ObsidianNote[],
-    outlineDocuments: OutlineDocument[]
+    outlineDocuments: OutlineDocument[],
+    collections: OutlineCollection[]
   ): Promise<SyncResult> {
     const result: SyncResult = { created: 0, updated: 0, deleted: 0, conflicts: [] };
 
     const obsidianMap = new Map(obsidianNotes.map(n => [n.path, n]));
+    const collectionNameById = new Map(collections.map(c => [c.id, c.name]));
+    const collectionIdByName = new Map(collections.map(c => [c.name, c.id]));
 
     // Load full content for all Outline documents
     const fullOutlineDocs: OutlineDocument[] = [];
+    const docById = new Map<string, OutlineDocument>();
     for (const doc of outlineDocuments) {
       try {
         const fullDoc = await this.outlineClient.getDocument(doc.id);
         fullOutlineDocs.push(fullDoc);
+        docById.set(fullDoc.id, fullDoc);
       } catch (error) {
         this.logger.warn(`Failed to load document ${doc.id}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
-    const outlineMap = new Map(fullOutlineDocs.map(d => [this.syncState.outlineIdMap[d.id], d]));
-
     // Sync Obsidian notes to Outline
+    const firstCollectionId = collections.length > 0 ? collections[0].id : undefined;
     for (const note of obsidianNotes) {
-      const outlineDoc = outlineMap.get(note.path);
+      const outlineDoc = fullOutlineDocs.find(d => this.syncState.outlineIdMap[d.id] === note.path);
 
       if (!outlineDoc) {
-        const created = await this.outlineClient.createDocument(note.title, note.content);
+        const { collectionId, parentDocumentId } = this.extractCollectionAndParentFromPath(note.path, collectionIdByName, firstCollectionId);
+        const created = await this.outlineClient.createDocument(note.title, note.content, collectionId, parentDocumentId);
         this.syncState.outlineIdMap[created.id] = note.path;
         result.created++;
       } else {
@@ -101,7 +107,7 @@ export class SyncEngine {
         if (noteHash !== outlineHash) {
           const resolvedNote = this.resolveConflict(note, outlineDoc);
           if (resolvedNote === note) {
-            await this.outlineClient.updateDocument(outlineDoc.id, note.content);
+            await this.outlineClient.updateDocument(outlineDoc.id, note.content, note.title);
             result.updated++;
           } else {
             await this.obsidianReader.writeNote(note.path, resolvedNote.content);
@@ -118,7 +124,7 @@ export class SyncEngine {
       const mappedPath = this.syncState.outlineIdMap[outlineDoc.id];
 
       if (!mappedPath || !obsidianMap.has(mappedPath)) {
-        const notePath = this.createNotePathFromOutlineTitle(outlineDoc.title);
+        const notePath = this.buildObsidianPath(outlineDoc, collectionNameById, docById);
         if (!await this.obsidianReader.noteExists(notePath)) {
           await this.obsidianReader.writeNote(notePath, outlineDoc.text);
           this.syncState.outlineIdMap[outlineDoc.id] = notePath;
@@ -130,8 +136,45 @@ export class SyncEngine {
     return result;
   }
 
-  private createNotePathFromOutlineTitle(title: string): string {
-    return `${title.replace(/[^a-z0-9\s]/gi, '').replace(/\s+/g, '-').toLowerCase()}.md`;
+  private buildObsidianPath(
+    doc: OutlineDocument,
+    collectionNameById: Map<string, string>,
+    docById: Map<string, OutlineDocument>
+  ): string {
+    const parts: string[] = [];
+
+    // Walk parentDocumentId chain (for nested documents)
+    let parentId = doc.parentDocumentId;
+    while (parentId) {
+      const parent = docById.get(parentId);
+      if (!parent) break;
+      parts.unshift(parent.title);
+      parentId = parent.parentDocumentId;
+    }
+
+    // Collection = root folder
+    const collectionName = collectionNameById.get(doc.collectionId) ?? 'Unsorted';
+    parts.unshift(collectionName);
+    parts.push(`${doc.title}.md`);
+
+    return parts.join('/');
+  }
+
+  private extractCollectionAndParentFromPath(
+    notePath: string,
+    collectionIdByName: Map<string, string>,
+    firstCollectionId?: string
+  ): { collectionId: string; parentDocumentId?: string } {
+    const parts = notePath.split('/').filter(p => p);
+    const collectionName = parts[0];
+    const collectionId = collectionIdByName.get(collectionName) || firstCollectionId;
+
+    if (!collectionId) {
+      this.logger.warn(`No collection found for path ${notePath}`);
+      return { collectionId: '' };
+    }
+
+    return { collectionId };
   }
 
   private resolveConflict(note: ObsidianNote, outlineDoc: OutlineDocument): ObsidianNote {

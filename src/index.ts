@@ -6,13 +6,14 @@ import * as path from 'path';
 import { SyncEngine } from './core/sync';
 import { Logger } from './utils/logger';
 import { loadConfig, saveConfig, validateConfig, getConfigFile, getConfigDir } from './utils/config';
+import { VERSION } from './version';
 
 const logger = new Logger('obsline');
 
 program
   .name('obsline')
   .description('Bi-directional sync between Obsidian and Outline')
-  .version('0.1.0');
+  .version(VERSION);
 
 program
   .command('config')

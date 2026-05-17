@@ -1,0 +1,4 @@
+/* Obsline plugin styles */
+.obsline-settings-desc a {
+  color: var(--link-color);
+}

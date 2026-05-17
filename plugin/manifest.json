@@ -1,0 +1,10 @@
+{
+  "id": "obsline",
+  "name": "Obsline – Outline Sync",
+  "version": "0.2.0",
+  "minAppVersion": "1.4.0",
+  "description": "Bi-directional sync between your Obsidian vault and a self-hosted Outline instance.",
+  "author": "Marvin Webmeleon",
+  "authorUrl": "https://webmeleon.de",
+  "isDesktopOnly": false
+}

@@ -4,149 +4,117 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Obsline** — A bi-directional synchronization connector between Obsidian and Outline.
+**Obsline v0.2.0** — Bi-directional sync between Obsidian and a self-hosted Outline instance.
 
-**Goal:** Keep local Markdown files in Obsidian in sync with Outline, enabling:
-- Local MD files on desktop (Mac, Windows, Linux) for RAG/ML use cases
-- Outline as a secondary interface (especially via web on mobile)
-- Seamless note taking across devices
+Two distinct deliverables in one repo:
+1. **CLI tool** (`src/`) — Node.js + Commander.js, runs on any machine
+2. **Obsidian plugin** (`plugin/`) — esbuild-bundled TypeScript, uses Obsidian's plugin API
 
-**Key Constraint:** Local MD files are the source of truth for RAG/LLM applications.
-
-## Tech Stack
-
-- **Runtime:** Node.js 18+ with TypeScript
-- **Package Manager:** npm or yarn
-- **CLI Framework:** Commander.js (for CLI commands)
-- **Daemon/Service:** node-daemon or native OS services
-- **Testing:** Jest or Vitest
-- **File Handling:** fs-extra (cross-platform file ops)
-- **APIs:** 
-  - Obsidian Vault API (local file system)
-  - Outline API (REST)
-
-## Project Structure
-
-```
-obsline/
-├── src/
-│   ├── cli/                 # CLI entry points
-│   │   └── commands/        # Individual CLI commands (sync, status, config, etc.)
-│   ├── core/                # Core sync logic
-│   │   ├── obsidian.ts      # Obsidian vault reader
-│   │   ├── outline.ts       # Outline API client
-│   │   └── sync.ts          # Bi-directional sync engine
-│   ├── daemon/              # Background service (optional)
-│   │   └── service.ts       # Daemon lifecycle management
-│   ├── utils/               # Shared utilities
-│   │   ├── logger.ts
-│   │   └── config.ts        # Config file management (~/.obsline/config.json)
-│   └── index.ts
-├── tests/                   # Jest/Vitest test files
-│   ├── sync.test.ts
-│   ├── obsidian.test.ts
-│   └── outline.test.ts
-├── package.json
-├── tsconfig.json
-├── jest.config.js (or vitest.config.ts)
-└── README.md
-```
+**Key design constraints:**
+- Local `.md` files are the source of truth for RAG/ML pipelines
+- No deletion propagation from Outline → Obsidian (only Obsidian deletes propagate to Outline)
+- All Outline API endpoints use **POST** (not GET)
+- Documents must be created with `publish: true` or they land in Drafts
 
 ## Common Commands
 
 ```bash
-# Setup
+# CLI tool
 npm install
+npm test                        # Run all 43 tests (Jest)
+npm test -- tests/sync.test.ts  # Run one test file
+npm run dev sync                # Test sync against real Outline
+npm run dev sync --daemon       # Polling daemon mode
+npm run type-check              # TypeScript check without emit
 
-# Development
-npm run dev                  # Run CLI in dev mode
-npm run build               # Compile TypeScript to JS
-npm run watch               # Watch and recompile on changes
+# Obsidian plugin
+cd plugin && npm install
+npm run build                   # Production bundle → plugin/main.js
+npm run dev                     # Watch mode (esbuild --watch)
 
-# Testing
-npm test                    # Run all tests
-npm test -- sync.test.ts   # Run specific test file
-npm test -- --watch        # Watch mode for tests
-
-# Linting & Formatting
-npm run lint                # Run ESLint
-npm run format              # Format with Prettier
-npm run type-check          # Run TypeScript type checker
-
-# Production
-npm run build
-npm start                   # Run compiled CLI
-npm run daemon:start        # Start background service
-npm run daemon:stop         # Stop background service
+# Deploy plugin to vault (macOS)
+VAULT=~/Documents/Obsidian/Marvin
+cp plugin/main.js plugin/manifest.json plugin/styles.css \
+   "$VAULT/.obsidian/plugins/obsline/"
 ```
 
 ## Architecture
 
-### Core Components
+### CLI tool (`src/`)
 
-1. **Obsidian Module** (`src/core/obsidian.ts`)
-   - Reads local vault (file system)
-   - Tracks file metadata (modified time, size)
-   - Handles nested folder structures
+| File | Role |
+|------|------|
+| `src/version.ts` | Single source of version string (`VERSION = '0.2.0'`) |
+| `src/index.ts` | Commander.js CLI — commands: `sync`, `config`, `status` |
+| `src/core/obsidian.ts` | Vault reader/writer using `fs-extra`; uses `minimatch` (v9 named import) |
+| `src/core/outline.ts` | Outline REST client using `axios`; all calls are POST |
+| `src/core/sync.ts` | Bi-directional sync engine; manages `SyncState` |
+| `src/utils/config.ts` | Config at `~/.obsline/config.json`; `getConfigDir()` is dynamic (reads `process.env.HOME` at call time) |
+| `src/utils/logger.ts` | Simple timestamped logger |
 
-2. **Outline Module** (`src/core/outline.ts`)
-   - REST API client for Outline
-   - Authentication handling
-   - Document CRUD operations
+### Obsidian plugin (`plugin/src/`)
 
-3. **Sync Engine** (`src/core/sync.ts`)
-   - Conflict resolution (last-write-wins or manual)
-   - Bidirectional change detection
-   - Metadata tracking (sync state file: `~/.obsline/sync-state.json`)
+| File | Role |
+|------|------|
+| `main.ts` | Plugin lifecycle, status bar, ribbon icon, commands, sync scheduler |
+| `settings.ts` | `PluginSettingTab` — full settings UI including connection test and sync status |
+| `sync-engine.ts` | Sync logic using `app.vault` API instead of `fs`; `requestUrl` instead of axios |
+| `outline-client.ts` | Outline REST client using Obsidian's `requestUrl` |
+| `types.ts` | Shared interfaces: `ObslineSettings`, `SyncState`, `OutlineDocument`, etc. |
 
-4. **CLI** (`src/cli/`)
-   - Commands: `sync`, `status`, `config`, `auth`
-   - User-facing interface
+### Sync state
 
-5. **Daemon** (optional, `src/daemon/`)
-   - Polls for changes periodically
-   - Runs on schedule (e.g., every 5 minutes)
+Both the CLI and plugin maintain a `SyncState` with:
+- `outlineIdMap`: `outlineId → obsidianPath`
+- `pathToOutlineId`: `obsidianPath → outlineId` (reverse, for O(1) rename detection)
+- `fileHashes`: `obsidianPath → md5(content)` (change detection)
+- `firstSyncDone`: controls initial-sync-direction logic
 
-### Sync Strategy
+CLI stores state at `~/.obsline/sync-state.json`. Plugin uses `this.loadData()`/`this.saveData()`.
 
-- **Change Detection:** Compare file timestamps + content hash (MD5/SHA1)
-- **Conflict Resolution:** Log conflicts, user decision or last-write-wins
-- **Sync State:** Stored locally in `~/.obsline/sync-state.json`
-  - Tracks: last-synced version, file hashes, timestamps
-- **Bi-directional:** Changes in Obsidian AND Outline are detected and merged
+### Rename detection
 
-## Configuration
+When an Obsidian file has no known Outline mapping, its content hash is checked against `hashToOutlineId` (built from all loaded Outline documents). A match with a different path = rename → `updateDocument` with new title, update both maps.
 
-Config file: `~/.obsline/config.json`
+### Collection ↔ Folder mapping
 
-```json
-{
-  "obsidianVault": "/Users/user/Vaults/MyVault",
-  "outlineUrl": "https://outline.example.com",
-  "outlineApiToken": "...",
-  "syncInterval": 300,
-  "conflictResolution": "last-write-wins",
-  "ignorePaths": [".obsidian", ".trash", "*.tmp"]
-}
-```
+- Top-level Obsidian folders → Outline Collections
+- `ensureCollections()` auto-creates missing Collections before sync
+- `buildPath()` walks `parentDocumentId` chain to reconstruct nested paths
 
 ## Key Decisions
 
-- **Local files as source of truth:** Obsidian is primary, Outline is secondary. Deletes in Outline don't delete local files.
-- **No deletion propagation:** Only Obsidian deletes trigger Outline deletion (safer for RAG).
-- **Config in home directory:** `~/.obsline/` for user-agnostic setup across devices.
-- **Cross-platform:** Use `path` module and `fs-extra` for file ops, avoid shell-specific code.
+- `getConfigDir()` / `getConfigFile()` read `process.env.HOME` dynamically so test overrides work
+- Plugin uses Obsidian's `requestUrl` (not axios) to work in Electron's renderer process
+- esbuild externals include all Node.js builtins so `crypto` works at runtime in Obsidian
+- On-change sync debounces 30 seconds to avoid mid-edit noise
+- `publish: true` is required on create/update — otherwise documents go to Drafts
 
-## Testing Strategy
+## Testing
 
-- **Unit Tests:** Sync logic, conflict detection, file handling
-- **Integration Tests:** Mock Outline API, test real file I/O
-- **No E2E tests initially:** Too risky with real Outline/Obsidian instances
+```bash
+npm test                 # All suites
+npm test -- --watch      # Watch mode
+```
 
-## Future Enhancements
+Tests mock `../src/core/obsidian` and `../src/core/outline` via `jest.mock()`. Tests that manipulate `syncState` before calling `sync()` must redirect `HOME` to a temp dir so `loadSyncState()` doesn't overwrite the injected state:
 
-- Obsidian plugin for native integration
-- Encryption for Outline API tokens
-- Advanced conflict resolution (3-way merge)
-- Web UI for configuration
-- Docker image for headless sync
+```typescript
+const originalHome = process.env.HOME;
+process.env.HOME = tempVault; // no sync-state.json here
+try { /* test */ } finally { process.env.HOME = originalHome; }
+```
+
+## Config
+
+`~/.obsline/config.json`:
+```json
+{
+  "obsidianVault": "/Users/marvin/Documents/Obsidian/Marvin",
+  "outlineUrl": "https://notes.hydrahub.de",
+  "outlineApiToken": "ol_api_...",
+  "syncInterval": 300,
+  "conflictResolution": "last-write-wins",
+  "ignorePaths": [".obsidian", ".trash", ".DS_Store", "*.tmp"]
+}
+```

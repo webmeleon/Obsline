@@ -39,21 +39,21 @@ describe('OutlineClient', () => {
   describe('testConnection', () => {
     test('should return true on successful connection', async () => {
       const mockInstance = {
-        get: jest.fn().mockResolvedValue({}),
-        post: jest.fn(),
+        get: jest.fn(),
+        post: jest.fn().mockResolvedValue({}),
       };
       mockedAxios.create.mockReturnValue(mockInstance as any);
       const testClient = new OutlineClient(baseUrl, token);
 
       const result = await testClient.testConnection();
       expect(result).toBe(true);
-      expect(mockInstance.get).toHaveBeenCalledWith('/documents.list');
+      expect(mockInstance.post).toHaveBeenCalledWith('/documents.list', {});
     });
 
     test('should return false on failed connection', async () => {
       const mockInstance = {
-        get: jest.fn().mockRejectedValue(new Error('Connection failed')),
-        post: jest.fn(),
+        get: jest.fn(),
+        post: jest.fn().mockRejectedValue(new Error('Connection failed')),
       };
       mockedAxios.create.mockReturnValue(mockInstance as any);
       const testClient = new OutlineClient(baseUrl, token);
@@ -71,10 +71,10 @@ describe('OutlineClient', () => {
       ];
 
       const mockInstance = {
-        get: jest.fn().mockResolvedValue({
+        get: jest.fn(),
+        post: jest.fn().mockResolvedValue({
           data: { data: mockDocuments },
         }),
-        post: jest.fn(),
       };
       mockedAxios.create.mockReturnValue(mockInstance as any);
       const testClient = new OutlineClient(baseUrl, token);
@@ -87,8 +87,8 @@ describe('OutlineClient', () => {
 
     test('should throw on error', async () => {
       const mockInstance = {
-        get: jest.fn().mockRejectedValue(new Error('API error')),
-        post: jest.fn(),
+        get: jest.fn(),
+        post: jest.fn().mockRejectedValue(new Error('API error')),
       };
       mockedAxios.create.mockReturnValue(mockInstance as any);
       const testClient = new OutlineClient(baseUrl, token);
@@ -108,10 +108,10 @@ describe('OutlineClient', () => {
       };
 
       const mockInstance = {
-        get: jest.fn().mockResolvedValue({
+        get: jest.fn(),
+        post: jest.fn().mockResolvedValue({
           data: { data: mockDoc },
         }),
-        post: jest.fn(),
       };
       mockedAxios.create.mockReturnValue(mockInstance as any);
       const testClient = new OutlineClient(baseUrl, token);
@@ -120,7 +120,7 @@ describe('OutlineClient', () => {
       expect(result.id).toBe('1');
       expect(result.title).toBe('Test Doc');
       expect(result.text).toBe('Test content');
-      expect(mockInstance.get).toHaveBeenCalledWith('/documents.info', { params: { id: '1' } });
+      expect(mockInstance.post).toHaveBeenCalledWith('/documents.info', { id: '1' });
     });
   });
 

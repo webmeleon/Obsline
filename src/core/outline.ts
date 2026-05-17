@@ -41,7 +41,7 @@ export class OutlineClient {
 
   async testConnection(): Promise<boolean> {
     try {
-      await this.client.get('/documents.list');
+      await this.client.post('/documents.list', {});
       logger.info('Connection to Outline successful');
       return true;
     } catch (error) {
@@ -54,7 +54,7 @@ export class OutlineClient {
 
   async listDocuments(): Promise<OutlineDocument[]> {
     try {
-      const response = await this.client.get<OutlineListResponse>('/documents.list');
+      const response = await this.client.post<OutlineListResponse>('/documents.list', {});
       logger.debug(`Listed ${response.data.data.length} documents`);
       return response.data.data.map(doc => ({
         id: doc.id,
@@ -71,9 +71,7 @@ export class OutlineClient {
 
   async getDocument(id: string): Promise<OutlineDocument> {
     try {
-      const response = await this.client.get<OutlineDocResponse>('/documents.info', {
-        params: { id },
-      });
+      const response = await this.client.post<OutlineDocResponse>('/documents.info', { id });
       logger.debug(`Retrieved document: ${response.data.data.title}`);
       return response.data.data;
     } catch (error) {

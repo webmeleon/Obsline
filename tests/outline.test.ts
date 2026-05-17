@@ -149,6 +149,7 @@ describe('OutlineClient', () => {
       expect(mockInstance.post).toHaveBeenCalledWith('/documents.create', {
         title: 'New Doc',
         text: 'New content',
+        publish: true,
       });
     });
 
@@ -167,6 +168,7 @@ describe('OutlineClient', () => {
         title: 'New Doc',
         text: 'content',
         collectionId: 'col-123',
+        publish: true,
       });
     });
   });
@@ -195,6 +197,7 @@ describe('OutlineClient', () => {
       expect(mockInstance.post).toHaveBeenCalledWith('/documents.update', {
         id: '1',
         text: 'Updated content',
+        publish: true,
       });
     });
   });
@@ -210,6 +213,61 @@ describe('OutlineClient', () => {
 
       await testClient.deleteDocument('1');
       expect(mockInstance.post).toHaveBeenCalledWith('/documents.delete', { id: '1' });
+    });
+  });
+
+  describe('listCollections', () => {
+    test('should return list of collections', async () => {
+      const mockCollections = [
+        { id: 'col-1', name: 'ToDo', description: null },
+        { id: 'col-2', name: 'Projects', description: 'Project notes' },
+      ];
+      const mockInstance = {
+        get: jest.fn(),
+        post: jest.fn().mockResolvedValue({ data: { data: mockCollections } }),
+      };
+      mockedAxios.create.mockReturnValue(mockInstance as any);
+      const testClient = new OutlineClient(baseUrl, token);
+
+      const result = await testClient.listCollections();
+      expect(result).toHaveLength(2);
+      expect(result[0].id).toBe('col-1');
+      expect(result[0].name).toBe('ToDo');
+      expect(mockInstance.post).toHaveBeenCalledWith('/collections.list', {});
+    });
+  });
+
+  describe('createCollection', () => {
+    test('should create a collection', async () => {
+      const newCollection = { id: 'col-3', name: 'NewFolder', description: null };
+      const mockInstance = {
+        get: jest.fn(),
+        post: jest.fn().mockResolvedValue({ data: { data: newCollection } }),
+      };
+      mockedAxios.create.mockReturnValue(mockInstance as any);
+      const testClient = new OutlineClient(baseUrl, token);
+
+      const result = await testClient.createCollection('NewFolder');
+      expect(result.id).toBe('col-3');
+      expect(result.name).toBe('NewFolder');
+      expect(mockInstance.post).toHaveBeenCalledWith('/collections.create', { name: 'NewFolder' });
+    });
+
+    test('should create a collection with description', async () => {
+      const mockInstance = {
+        get: jest.fn(),
+        post: jest.fn().mockResolvedValue({
+          data: { data: { id: 'col-4', name: 'Archive', description: 'Old stuff' } },
+        }),
+      };
+      mockedAxios.create.mockReturnValue(mockInstance as any);
+      const testClient = new OutlineClient(baseUrl, token);
+
+      await testClient.createCollection('Archive', 'Old stuff');
+      expect(mockInstance.post).toHaveBeenCalledWith('/collections.create', {
+        name: 'Archive',
+        description: 'Old stuff',
+      });
     });
   });
 });

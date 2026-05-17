@@ -15,8 +15,6 @@ export interface ObslineConfig {
   ignorePaths: string[];
 }
 
-const CONFIG_DIR = path.join(process.env.HOME || '~', '.obsline');
-const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
 const DEFAULT_CONFIG: ObslineConfig = {
   obsidianVault: '',
@@ -28,11 +26,12 @@ const DEFAULT_CONFIG: ObslineConfig = {
 };
 
 export async function loadConfig(): Promise<ObslineConfig> {
+  const configFile = getConfigFile();
   try {
-    if (await fs.pathExists(CONFIG_FILE)) {
-      const raw = await fs.readFile(CONFIG_FILE, 'utf-8');
+    if (await fs.pathExists(configFile)) {
+      const raw = await fs.readFile(configFile, 'utf-8');
       const config = JSON.parse(raw) as ObslineConfig;
-      logger.debug(`Config loaded from ${CONFIG_FILE}`);
+      logger.debug(`Config loaded from ${configFile}`);
       return { ...DEFAULT_CONFIG, ...config };
     }
   } catch (error) {
@@ -44,9 +43,11 @@ export async function loadConfig(): Promise<ObslineConfig> {
 }
 
 export async function saveConfig(config: ObslineConfig): Promise<void> {
-  await fs.ensureDir(CONFIG_DIR);
-  await fs.writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
-  logger.info(`Config saved to ${CONFIG_FILE}`);
+  const configDir = getConfigDir();
+  const configFile = getConfigFile();
+  await fs.ensureDir(configDir);
+  await fs.writeFile(configFile, JSON.stringify(config, null, 2), 'utf-8');
+  logger.info(`Config saved to ${configFile}`);
 }
 
 export async function validateConfig(config: ObslineConfig): Promise<string[]> {
@@ -74,9 +75,9 @@ export async function validateConfig(config: ObslineConfig): Promise<string[]> {
 }
 
 export function getConfigDir(): string {
-  return CONFIG_DIR;
+  return path.join(process.env.HOME || '~', '.obsline');
 }
 
 export function getConfigFile(): string {
-  return CONFIG_FILE;
+  return path.join(getConfigDir(), 'config.json');
 }

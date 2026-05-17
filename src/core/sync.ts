@@ -9,13 +9,17 @@ import { Logger } from '../utils/logger';
 interface SyncState {
   lastSyncTime: number;
   fileHashes: Record<string, string>;
+  // outlineId -> obsidianPath
   outlineIdMap: Record<string, string>;
+  // obsidianPath -> outlineId (for rename detection)
+  pathToOutlineId: Record<string, string>;
 }
 
 interface SyncResult {
   created: number;
   updated: number;
   deleted: number;
+  renamed: number;
   conflicts: string[];
 }
 
@@ -28,6 +32,7 @@ export class SyncEngine {
     lastSyncTime: 0,
     fileHashes: {},
     outlineIdMap: {},
+    pathToOutlineId: {},
   };
 
   constructor(config: ObslineConfig) {
@@ -49,14 +54,23 @@ export class SyncEngine {
         this.outlineClient.listCollections(),
       ]);
 
-      const result = await this.syncBidirectional(obsidianNotes, outlineDocuments, collections);
+      // Create missing collections for new Obsidian folders
+      const updatedCollections = await this.ensureCollectionsForFolders(
+        obsidianNotes,
+        collections
+      );
+
+      const result = await this.syncBidirectional(obsidianNotes, outlineDocuments, updatedCollections);
 
       await this.saveSyncState();
       this.syncState.lastSyncTime = startTime;
 
-      this.logger.info(`Sync completed: ${result.created} created, ${result.updated} updated, ${result.deleted} deleted`);
+      this.logger.info(
+        `Sync completed: ${result.created} created, ${result.updated} updated, ` +
+        `${result.renamed} renamed, ${result.deleted} deleted`
+      );
       if (result.conflicts.length > 0) {
-        this.logger.warn(`Conflicts detected: ${result.conflicts.join(', ')}`);
+        this.logger.warn(`Conflicts: ${result.conflicts.join(', ')}`);
       }
 
       return result;
@@ -66,54 +80,112 @@ export class SyncEngine {
     }
   }
 
+  // Creates Outline collections for any new top-level folders in Obsidian
+  private async ensureCollectionsForFolders(
+    notes: ObsidianNote[],
+    collections: OutlineCollection[]
+  ): Promise<OutlineCollection[]> {
+    const existingNames = new Set(collections.map(c => c.name));
+    const vaultFolders = new Set<string>();
+
+    for (const note of notes) {
+      const parts = note.path.split('/');
+      if (parts.length > 1) {
+        vaultFolders.add(parts[0]);
+      }
+    }
+
+    const updated = [...collections];
+    for (const folder of vaultFolders) {
+      if (!existingNames.has(folder)) {
+        this.logger.info(`Creating collection for new folder: ${folder}`);
+        const newCollection = await this.outlineClient.createCollection(folder);
+        updated.push(newCollection);
+        existingNames.add(folder);
+      }
+    }
+
+    return updated;
+  }
+
   private async syncBidirectional(
     obsidianNotes: ObsidianNote[],
     outlineDocuments: OutlineDocument[],
     collections: OutlineCollection[]
   ): Promise<SyncResult> {
-    const result: SyncResult = { created: 0, updated: 0, deleted: 0, conflicts: [] };
+    const result: SyncResult = { created: 0, updated: 0, deleted: 0, renamed: 0, conflicts: [] };
 
-    const obsidianMap = new Map(obsidianNotes.map(n => [n.path, n]));
     const collectionNameById = new Map(collections.map(c => [c.id, c.name]));
     const collectionIdByName = new Map(collections.map(c => [c.name, c.id]));
 
-    // Build reverse mapping: obsidian path -> outline doc IDs (to avoid duplicates)
+    // Build reverse path → outlineIds map (for duplicate prevention)
     const pathToOutlineIds = new Map<string, string[]>();
     for (const [outlineId, obsidianPath] of Object.entries(this.syncState.outlineIdMap)) {
-      if (!pathToOutlineIds.has(obsidianPath)) {
-        pathToOutlineIds.set(obsidianPath, []);
-      }
+      if (!pathToOutlineIds.has(obsidianPath)) pathToOutlineIds.set(obsidianPath, []);
       pathToOutlineIds.get(obsidianPath)!.push(outlineId);
     }
 
-    // Load full content for all Outline documents
+    // Load full document content
     const fullOutlineDocs: OutlineDocument[] = [];
     const docById = new Map<string, OutlineDocument>();
+    // hash → outlineId (for rename detection)
+    const hashToOutlineId = new Map<string, string>();
+
     for (const doc of outlineDocuments) {
       try {
         const fullDoc = await this.outlineClient.getDocument(doc.id);
         fullOutlineDocs.push(fullDoc);
         docById.set(fullDoc.id, fullDoc);
+        if (fullDoc.text) {
+          hashToOutlineId.set(this.hashContent(fullDoc.text), fullDoc.id);
+        }
       } catch (error) {
         this.logger.warn(`Failed to load document ${doc.id}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
-    // Sync Obsidian notes to Outline
-    const firstCollectionId = collections.length > 0 ? collections[0].id : undefined;
+    // ── Obsidian → Outline ──────────────────────────────────────────────────
+
+    const obsidianMap = new Map(obsidianNotes.map(n => [n.path, n]));
+
     for (const note of obsidianNotes) {
-      const outlineDoc = fullOutlineDocs.find(d => this.syncState.outlineIdMap[d.id] === note.path);
+      const knownOutlineId = this.syncState.pathToOutlineId[note.path];
+      const outlineDoc = knownOutlineId ? docById.get(knownOutlineId) : undefined;
 
       if (!outlineDoc) {
-        const { collectionId, parentDocumentId } = this.extractCollectionAndParentFromPath(note.path, collectionIdByName, firstCollectionId);
-        const created = await this.outlineClient.createDocument(note.title, note.content, collectionId, parentDocumentId);
-        this.syncState.outlineIdMap[created.id] = note.path;
-        result.created++;
+        // Check if this is a rename: same content hash already exists in Outline
+        const noteHash = this.hashContent(note.content);
+        const renamedFromId = hashToOutlineId.get(noteHash);
+        const renamedFromPath = renamedFromId ? this.syncState.outlineIdMap[renamedFromId] : undefined;
+
+        if (renamedFromId && renamedFromPath && renamedFromPath !== note.path) {
+          // Rename detected: update title in Outline, update mappings
+          this.logger.info(`Rename detected: "${renamedFromPath}" → "${note.path}"`);
+          await this.outlineClient.updateDocument(renamedFromId, note.content, note.title);
+          delete this.syncState.outlineIdMap[renamedFromId];
+          this.syncState.outlineIdMap[renamedFromId] = note.path;
+          this.syncState.pathToOutlineId[note.path] = renamedFromId;
+          delete this.syncState.pathToOutlineId[renamedFromPath];
+          result.renamed++;
+        } else {
+          // Truly new document
+          const { collectionId, parentDocumentId } = this.extractCollectionAndParentFromPath(
+            note.path, collectionIdByName
+          );
+          const created = await this.outlineClient.createDocument(
+            note.title, note.content, collectionId, parentDocumentId
+          );
+          this.syncState.outlineIdMap[created.id] = note.path;
+          this.syncState.pathToOutlineId[note.path] = created.id;
+          result.created++;
+        }
       } else {
+        // Known document — check for content or title changes
         const noteHash = this.hashContent(note.content);
         const outlineHash = this.hashContent(outlineDoc.text);
+        const titleChanged = note.title !== outlineDoc.title;
 
-        if (noteHash !== outlineHash) {
+        if (noteHash !== outlineHash || titleChanged) {
           const resolvedNote = this.resolveConflict(note, outlineDoc);
           if (resolvedNote === note) {
             await this.outlineClient.updateDocument(outlineDoc.id, note.content, note.title);
@@ -128,31 +200,31 @@ export class SyncEngine {
       this.syncState.fileHashes[note.path] = this.hashContent(note.content);
     }
 
-    // Sync Outline documents to Obsidian
+    // ── Outline → Obsidian ──────────────────────────────────────────────────
+
     for (const outlineDoc of fullOutlineDocs) {
       const mappedPath = this.syncState.outlineIdMap[outlineDoc.id];
 
-      if (!mappedPath || !obsidianMap.has(mappedPath)) {
-        const notePath = this.buildObsidianPath(outlineDoc, collectionNameById, docById);
+      if (mappedPath && obsidianMap.has(mappedPath)) continue; // already in sync
 
-        // Check if this path already has a mapping (avoid duplicates)
-        const existingOutlineIds = pathToOutlineIds.get(notePath) || [];
-        if (existingOutlineIds.length > 0) {
-          // Path already exists in sync state, use the first mapping
-          this.syncState.outlineIdMap[outlineDoc.id] = notePath;
-          this.logger.debug(`Mapped outline doc ${outlineDoc.id} to existing path ${notePath}`);
-        } else if (!await this.obsidianReader.noteExists(notePath)) {
-          // Path doesn't exist anywhere, create new file
-          await this.obsidianReader.writeNote(notePath, outlineDoc.text);
-          this.syncState.outlineIdMap[outlineDoc.id] = notePath;
-          pathToOutlineIds.set(notePath, [outlineDoc.id]);
-          result.created++;
-        } else {
-          // File exists but not in sync state, add mapping without recreating
-          this.syncState.outlineIdMap[outlineDoc.id] = notePath;
-          pathToOutlineIds.set(notePath, [...(pathToOutlineIds.get(notePath) || []), outlineDoc.id]);
-          this.logger.debug(`Added mapping for existing file ${notePath}`);
-        }
+      const notePath = this.buildObsidianPath(outlineDoc, collectionNameById, docById);
+      const existingIds = pathToOutlineIds.get(notePath) || [];
+
+      if (existingIds.length > 0) {
+        // Path already mapped — just update state entry
+        this.syncState.outlineIdMap[outlineDoc.id] = notePath;
+        this.syncState.pathToOutlineId[notePath] = outlineDoc.id;
+      } else if (!await this.obsidianReader.noteExists(notePath)) {
+        await this.obsidianReader.writeNote(notePath, outlineDoc.text);
+        this.syncState.outlineIdMap[outlineDoc.id] = notePath;
+        this.syncState.pathToOutlineId[notePath] = outlineDoc.id;
+        pathToOutlineIds.set(notePath, [outlineDoc.id]);
+        result.created++;
+      } else {
+        // File exists on disk but wasn't in state — adopt it
+        this.syncState.outlineIdMap[outlineDoc.id] = notePath;
+        this.syncState.pathToOutlineId[notePath] = outlineDoc.id;
+        pathToOutlineIds.set(notePath, [outlineDoc.id]);
       }
     }
 
@@ -166,7 +238,6 @@ export class SyncEngine {
   ): string {
     const parts: string[] = [];
 
-    // Walk parentDocumentId chain (for nested documents)
     let parentId = doc.parentDocumentId;
     while (parentId) {
       const parent = docById.get(parentId);
@@ -175,7 +246,6 @@ export class SyncEngine {
       parentId = parent.parentDocumentId;
     }
 
-    // Collection = root folder
     const collectionName = collectionNameById.get(doc.collectionId) ?? 'Unsorted';
     parts.unshift(collectionName);
     parts.push(`${doc.title}.md`);
@@ -185,40 +255,32 @@ export class SyncEngine {
 
   private extractCollectionAndParentFromPath(
     notePath: string,
-    collectionIdByName: Map<string, string>,
-    firstCollectionId?: string
+    collectionIdByName: Map<string, string>
   ): { collectionId?: string; parentDocumentId?: string } {
     const parts = notePath.split('/').filter(p => p);
-    const collectionName = parts[0];
-    let collectionId = collectionIdByName.get(collectionName);
-
-    // If path doesn't match a known collection, only use firstCollectionId if path starts with a folder
-    if (!collectionId && parts.length > 1) {
-      // File is in a subfolder, use first collection
-      collectionId = firstCollectionId;
+    if (parts.length < 2) {
+      // Root-level file — no collection
+      return {};
     }
 
+    const collectionId = collectionIdByName.get(parts[0]);
     if (!collectionId) {
-      this.logger.warn(`No collection found for path ${notePath}, will be added to default Outline location`);
+      this.logger.warn(`No collection found for folder "${parts[0]}" in path ${notePath}`);
     }
 
     return { collectionId };
   }
 
   private resolveConflict(note: ObsidianNote, outlineDoc: OutlineDocument): ObsidianNote {
-    if (this.config.conflictResolution === 'obsidian-wins') {
-      return note;
-    }
+    if (this.config.conflictResolution === 'obsidian-wins') return note;
     if (this.config.conflictResolution === 'outline-wins') {
-      return {
-        ...note,
-        content: outlineDoc.text,
-        lastModified: new Date(outlineDoc.updatedAt).getTime(),
-      };
+      return { ...note, content: outlineDoc.text, lastModified: new Date(outlineDoc.updatedAt).getTime() };
     }
-    const noteTime = note.lastModified;
+    // last-write-wins
     const outlineTime = new Date(outlineDoc.updatedAt).getTime();
-    return noteTime > outlineTime ? note : { ...note, content: outlineDoc.text, lastModified: outlineTime };
+    return note.lastModified > outlineTime
+      ? note
+      : { ...note, content: outlineDoc.text, lastModified: outlineTime };
   }
 
   private hashContent(content: string): string {
@@ -229,8 +291,15 @@ export class SyncEngine {
     const stateFile = path.join(process.env.HOME || '~', '.obsline', 'sync-state.json');
     try {
       if (await fs.pathExists(stateFile)) {
-        const data = await fs.readFile(stateFile, 'utf-8');
-        this.syncState = JSON.parse(data);
+        const raw = JSON.parse(await fs.readFile(stateFile, 'utf-8'));
+        this.syncState = {
+          lastSyncTime: raw.lastSyncTime ?? 0,
+          fileHashes: raw.fileHashes ?? {},
+          outlineIdMap: raw.outlineIdMap ?? {},
+          // Rebuild pathToOutlineId from outlineIdMap if missing (migration)
+          pathToOutlineId: raw.pathToOutlineId ??
+            Object.fromEntries(Object.entries(raw.outlineIdMap ?? {}).map(([id, p]) => [p, id])),
+        };
         this.logger.debug('Sync state loaded');
       }
     } catch (error) {

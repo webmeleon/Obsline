@@ -17,6 +17,7 @@ export interface OutlineDocument {
   createdAt?: string;
   collectionId: string;
   parentDocumentId: string | null;
+  published: boolean;
 }
 
 interface OutlineListResponse {
@@ -27,6 +28,7 @@ interface OutlineListResponse {
     createdAt: string;
     collectionId: string;
     parentDocumentId: string | null;
+    published: boolean;
   }>;
 }
 
@@ -39,6 +41,7 @@ interface OutlineDocResponse {
     createdAt: string;
     collectionId: string;
     parentDocumentId: string | null;
+    published: boolean;
   };
 }
 
@@ -48,22 +51,16 @@ interface OutlineCollectionsResponse {
 
 export class OutlineClient {
   private client: AxiosInstance;
-  private baseUrl: string;
-  private token: string;
 
   constructor(baseUrl: string, token: string) {
-    this.baseUrl = baseUrl.replace(/\/$/, '');
-    this.token = token;
-
     this.client = axios.create({
-      baseURL: `${this.baseUrl}/api`,
+      baseURL: `${baseUrl.replace(/\/$/, '')}/api`,
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
     });
-
-    logger.debug(`OutlineClient initialized for ${this.baseUrl}`);
+    logger.debug(`OutlineClient initialized for ${baseUrl}`);
   }
 
   async testConnection(): Promise<boolean> {
@@ -72,9 +69,7 @@ export class OutlineClient {
       logger.info('Connection to Outline successful');
       return true;
     } catch (error) {
-      logger.error(
-        `Connection failed: ${error instanceof Error ? error.message : String(error)}`
-      );
+      logger.error(`Connection failed: ${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
   }
@@ -91,6 +86,7 @@ export class OutlineClient {
         createdAt: doc.createdAt,
         collectionId: doc.collectionId,
         parentDocumentId: doc.parentDocumentId,
+        published: doc.published ?? false,
       }));
     } catch (error) {
       logger.error(`Failed to list documents: ${error instanceof Error ? error.message : String(error)}`);
@@ -102,11 +98,9 @@ export class OutlineClient {
     try {
       const response = await this.client.post<OutlineDocResponse>('/documents.info', { id });
       logger.debug(`Retrieved document: ${response.data.data.title}`);
-      return response.data.data;
+      return { ...response.data.data, published: response.data.data.published ?? false };
     } catch (error) {
-      logger.error(
-        `Failed to get document ${id}: ${error instanceof Error ? error.message : String(error)}`
-      );
+      logger.error(`Failed to get document ${id}: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     }
   }
@@ -118,41 +112,28 @@ export class OutlineClient {
     parentDocumentId?: string
   ): Promise<OutlineDocument> {
     try {
-      const payload: Record<string, unknown> = {
-        title,
-        text,
-      };
-      if (collectionId) {
-        payload.collectionId = collectionId;
-      }
-      if (parentDocumentId) {
-        payload.parentDocumentId = parentDocumentId;
-      }
+      const payload: Record<string, unknown> = { title, text, publish: true };
+      if (collectionId) payload.collectionId = collectionId;
+      if (parentDocumentId) payload.parentDocumentId = parentDocumentId;
 
       const response = await this.client.post<OutlineDocResponse>('/documents.create', payload);
       logger.info(`Created document: ${response.data.data.title}`);
-      return response.data.data;
+      return { ...response.data.data, published: response.data.data.published ?? true };
     } catch (error) {
-      logger.error(
-        `Failed to create document: ${error instanceof Error ? error.message : String(error)}`
-      );
+      logger.error(`Failed to create document: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     }
   }
 
   async updateDocument(id: string, text: string, title?: string): Promise<OutlineDocument> {
     try {
-      const payload: Record<string, unknown> = { id, text };
-      if (title) {
-        payload.title = title;
-      }
+      const payload: Record<string, unknown> = { id, text, publish: true };
+      if (title) payload.title = title;
       const response = await this.client.post<OutlineDocResponse>('/documents.update', payload);
       logger.info(`Updated document: ${response.data.data.title}`);
-      return response.data.data;
+      return { ...response.data.data, published: response.data.data.published ?? true };
     } catch (error) {
-      logger.error(
-        `Failed to update document ${id}: ${error instanceof Error ? error.message : String(error)}`
-      );
+      logger.error(`Failed to update document ${id}: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     }
   }
@@ -162,9 +143,7 @@ export class OutlineClient {
       await this.client.post('/documents.delete', { id });
       logger.info(`Deleted document: ${id}`);
     } catch (error) {
-      logger.error(
-        `Failed to delete document ${id}: ${error instanceof Error ? error.message : String(error)}`
-      );
+      logger.error(`Failed to delete document ${id}: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     }
   }
@@ -176,6 +155,19 @@ export class OutlineClient {
       return response.data.data;
     } catch (error) {
       logger.error(`Failed to list collections: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
+  async createCollection(name: string, description?: string): Promise<OutlineCollection> {
+    try {
+      const payload: Record<string, unknown> = { name };
+      if (description) payload.description = description;
+      const response = await this.client.post<{ data: OutlineCollection }>('/collections.create', payload);
+      logger.info(`Created collection: ${response.data.data.name}`);
+      return response.data.data;
+    } catch (error) {
+      logger.error(`Failed to create collection: ${error instanceof Error ? error.message : String(error)}`);
       throw error;
     }
   }

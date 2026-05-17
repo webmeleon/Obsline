@@ -3,7 +3,11 @@
     "allow": [
       "Bash(npm audit *)",
       "Bash(npm test *)",
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "Bash(curl -s -X POST https://notes.hydrahub.de/api/documents.list -H 'Authorization: Bearer ol_api_REDACTED' -H 'Content-Type: application/json' -d '{}')",
+      "Bash(npm run *)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'Improve sync engine: load full document content and fix bidirectional sync *)"
     ]
   }
 }

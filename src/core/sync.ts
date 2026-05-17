@@ -72,19 +72,33 @@ export class SyncEngine {
     const result: SyncResult = { created: 0, updated: 0, deleted: 0, conflicts: [] };
 
     const obsidianMap = new Map(obsidianNotes.map(n => [n.path, n]));
-    const outlineMap = new Map(outlineDocuments.map(d => [this.syncState.outlineIdMap[d.id] || d.id, d]));
 
+    // Load full content for all Outline documents
+    const fullOutlineDocs: OutlineDocument[] = [];
+    for (const doc of outlineDocuments) {
+      try {
+        const fullDoc = await this.outlineClient.getDocument(doc.id);
+        fullOutlineDocs.push(fullDoc);
+      } catch (error) {
+        this.logger.warn(`Failed to load document ${doc.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    const outlineMap = new Map(fullOutlineDocs.map(d => [this.syncState.outlineIdMap[d.id], d]));
+
+    // Sync Obsidian notes to Outline
     for (const note of obsidianNotes) {
       const outlineDoc = outlineMap.get(note.path);
 
       if (!outlineDoc) {
-        await this.outlineClient.createDocument(note.title, note.content);
+        const created = await this.outlineClient.createDocument(note.title, note.content);
+        this.syncState.outlineIdMap[created.id] = note.path;
         result.created++;
       } else {
         const noteHash = this.hashContent(note.content);
         const outlineHash = this.hashContent(outlineDoc.text);
 
-        if (noteHash !== this.syncState.fileHashes[note.path] || outlineHash !== outlineHash) {
+        if (noteHash !== outlineHash) {
           const resolvedNote = this.resolveConflict(note, outlineDoc);
           if (resolvedNote === note) {
             await this.outlineClient.updateDocument(outlineDoc.id, note.content);
@@ -99,11 +113,12 @@ export class SyncEngine {
       this.syncState.fileHashes[note.path] = this.hashContent(note.content);
     }
 
-    for (const outlineDoc of outlineDocuments) {
-      const noteExists = obsidianMap.has(this.syncState.outlineIdMap[outlineDoc.id] || outlineDoc.title.toLowerCase().replace(/\s+/g, '-') + '.md');
+    // Sync Outline documents to Obsidian
+    for (const outlineDoc of fullOutlineDocs) {
+      const mappedPath = this.syncState.outlineIdMap[outlineDoc.id];
 
-      if (!noteExists) {
-        const notePath = `${outlineDoc.title.replace(/[^a-z0-9]/gi, '-').toLowerCase()}.md`;
+      if (!mappedPath || !obsidianMap.has(mappedPath)) {
+        const notePath = this.createNotePathFromOutlineTitle(outlineDoc.title);
         if (!await this.obsidianReader.noteExists(notePath)) {
           await this.obsidianReader.writeNote(notePath, outlineDoc.text);
           this.syncState.outlineIdMap[outlineDoc.id] = notePath;
@@ -113,6 +128,10 @@ export class SyncEngine {
     }
 
     return result;
+  }
+
+  private createNotePathFromOutlineTitle(title: string): string {
+    return `${title.replace(/[^a-z0-9\s]/gi, '').replace(/\s+/g, '-').toLowerCase()}.md`;
   }
 
   private resolveConflict(note: ObsidianNote, outlineDoc: OutlineDocument): ObsidianNote {

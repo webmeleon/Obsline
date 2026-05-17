@@ -77,6 +77,15 @@ export class SyncEngine {
     const collectionNameById = new Map(collections.map(c => [c.id, c.name]));
     const collectionIdByName = new Map(collections.map(c => [c.name, c.id]));
 
+    // Build reverse mapping: obsidian path -> outline doc IDs (to avoid duplicates)
+    const pathToOutlineIds = new Map<string, string[]>();
+    for (const [outlineId, obsidianPath] of Object.entries(this.syncState.outlineIdMap)) {
+      if (!pathToOutlineIds.has(obsidianPath)) {
+        pathToOutlineIds.set(obsidianPath, []);
+      }
+      pathToOutlineIds.get(obsidianPath)!.push(outlineId);
+    }
+
     // Load full content for all Outline documents
     const fullOutlineDocs: OutlineDocument[] = [];
     const docById = new Map<string, OutlineDocument>();
@@ -125,10 +134,24 @@ export class SyncEngine {
 
       if (!mappedPath || !obsidianMap.has(mappedPath)) {
         const notePath = this.buildObsidianPath(outlineDoc, collectionNameById, docById);
-        if (!await this.obsidianReader.noteExists(notePath)) {
+
+        // Check if this path already has a mapping (avoid duplicates)
+        const existingOutlineIds = pathToOutlineIds.get(notePath) || [];
+        if (existingOutlineIds.length > 0) {
+          // Path already exists in sync state, use the first mapping
+          this.syncState.outlineIdMap[outlineDoc.id] = notePath;
+          this.logger.debug(`Mapped outline doc ${outlineDoc.id} to existing path ${notePath}`);
+        } else if (!await this.obsidianReader.noteExists(notePath)) {
+          // Path doesn't exist anywhere, create new file
           await this.obsidianReader.writeNote(notePath, outlineDoc.text);
           this.syncState.outlineIdMap[outlineDoc.id] = notePath;
+          pathToOutlineIds.set(notePath, [outlineDoc.id]);
           result.created++;
+        } else {
+          // File exists but not in sync state, add mapping without recreating
+          this.syncState.outlineIdMap[outlineDoc.id] = notePath;
+          pathToOutlineIds.set(notePath, [...(pathToOutlineIds.get(notePath) || []), outlineDoc.id]);
+          this.logger.debug(`Added mapping for existing file ${notePath}`);
         }
       }
     }

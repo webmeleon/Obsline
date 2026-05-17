@@ -12,7 +12,8 @@
       "Bash(curl -s -X POST https://notes.hydrahub.de/api/documents.list -H \"Authorization: Bearer ol_api_REDACTED\" -H \"Content-Type: application/json\" -d '{\"includeArchived\": false}')",
       "Bash(python3 -c \"import sys, json; d = json.load\\(sys.stdin\\); [print\\(json.dumps\\({k: doc[k] for k in ['id','title','collectionId','parentDocumentId'] if k in doc}\\)\\) for doc in d['data']]\")",
       "Bash(git commit -m 'Implement Outline Collections → Obsidian folder structure *)",
-      "Bash(git commit -m 'Fix duplicate document creation in sync *)"
+      "Bash(git commit -m 'Fix duplicate document creation in sync *)",
+      "Bash(git commit -m 'Fix collection assignment for new documents *)"
     ]
   }
 }

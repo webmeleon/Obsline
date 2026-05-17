@@ -98,7 +98,7 @@ describe('SyncEngine', () => {
     const result = await syncEngine.sync();
 
     expect(result.created).toBe(1);
-    expect(mockClientInstance.createDocument).toHaveBeenCalledWith('test', 'Test content', '', undefined);
+    expect(mockClientInstance.createDocument).toHaveBeenCalledWith('test', 'Test content', undefined, undefined);
   });
 
   test('should handle sync errors gracefully', async () => {

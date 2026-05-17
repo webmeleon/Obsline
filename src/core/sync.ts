@@ -187,14 +187,19 @@ export class SyncEngine {
     notePath: string,
     collectionIdByName: Map<string, string>,
     firstCollectionId?: string
-  ): { collectionId: string; parentDocumentId?: string } {
+  ): { collectionId?: string; parentDocumentId?: string } {
     const parts = notePath.split('/').filter(p => p);
     const collectionName = parts[0];
-    const collectionId = collectionIdByName.get(collectionName) || firstCollectionId;
+    let collectionId = collectionIdByName.get(collectionName);
+
+    // If path doesn't match a known collection, only use firstCollectionId if path starts with a folder
+    if (!collectionId && parts.length > 1) {
+      // File is in a subfolder, use first collection
+      collectionId = firstCollectionId;
+    }
 
     if (!collectionId) {
-      this.logger.warn(`No collection found for path ${notePath}`);
-      return { collectionId: '' };
+      this.logger.warn(`No collection found for path ${notePath}, will be added to default Outline location`);
     }
 
     return { collectionId };

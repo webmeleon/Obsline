@@ -268,9 +268,7 @@ var SyncEngine = class {
       for (const doc of fullDocs) {
         const notePath = this.buildPath(doc, collectionNameById, docById);
         const mappedPath = state.outlineIdMap[doc.id];
-        if (mappedPath && obsidianMap.has(mappedPath))
-          continue;
-        if (doc.text === "" && mappedPath)
+        if (mappedPath)
           continue;
         const existingIds = pathToOutlineIds.get(notePath) || [];
         if (existingIds.length > 0) {

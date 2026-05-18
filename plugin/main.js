@@ -200,6 +200,8 @@ var SyncEngine = class {
         const knownId = state.pathToOutlineId[note.path];
         const outlineDoc = knownId ? docById.get(knownId) : void 0;
         if (!outlineDoc) {
+          if (knownId && !outlineIdSet.has(knownId))
+            continue;
           const noteHash = this.hash(note.content);
           const renamedFromId = hashToOutlineId.get(noteHash);
           const renamedFromPath = renamedFromId ? state.outlineIdMap[renamedFromId] : void 0;

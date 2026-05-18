@@ -163,6 +163,10 @@ export class SyncEngine {
       const outlineDoc = knownOutlineId ? docById.get(knownOutlineId) : undefined;
 
       if (!outlineDoc) {
+        // Doc was known but is no longer in Outline (e.g. collection deleted) → skip,
+        // the Outline→Obsidian deletion pass will remove the local file.
+        if (knownOutlineId && !outlineIdSet.has(knownOutlineId)) continue;
+
         const noteHash = this.hashContent(note.content);
         const renamedFromId = hashToOutlineId.get(noteHash);
         const renamedFromPath = renamedFromId ? this.syncState.outlineIdMap[renamedFromId] : undefined;

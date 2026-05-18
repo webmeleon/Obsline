@@ -15,6 +15,7 @@ export interface ObslineSettings {
   syncInterval: number; // 0 = on-change, N = every N minutes
   conflictResolution: ConflictResolution;
   initialSyncDirection: InitialSyncDirection;
+  inboxCollection: string; // collection name for root-level notes
   ignorePaths: string[];
   syncState: SyncState;
 }
@@ -25,6 +26,7 @@ export const DEFAULT_SETTINGS: ObslineSettings = {
   syncInterval: 5,
   conflictResolution: 'last-write-wins',
   initialSyncDirection: 'bidirectional',
+  inboxCollection: 'Inbox',
   ignorePaths: ['.obsidian', '.trash', '.DS_Store', 'Templates'],
   syncState: {
     lastSyncTime: 0,

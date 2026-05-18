@@ -113,6 +113,19 @@ export class ObslineSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName('Inbox collection')
+      .setDesc('Notes in the vault root (no subfolder) are synced to this Outline collection.')
+      .addText(text =>
+        text
+          .setPlaceholder('Inbox')
+          .setValue(this.plugin.settings.inboxCollection)
+          .onChange(async value => {
+            this.plugin.settings.inboxCollection = value.trim() || 'Inbox';
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
       .setName('Ignored paths')
       .setDesc('Comma-separated list of folders or files to exclude (e.g. Templates, Attachments).')
       .addTextArea(text =>

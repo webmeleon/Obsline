@@ -103,9 +103,21 @@ describe('SyncEngine', () => {
     expect(mockClientInstance.createDocument).toHaveBeenCalledWith('test', 'Test content', 'col-1', undefined);
   });
 
-  test('should skip root-level notes without a collection', async () => {
+  test('should sync root-level notes to Inbox collection', async () => {
     const mockReaderInstance = mockObsidianReader.mock.results[0].value;
     const mockClientInstance = mockOutlineClient.mock.results[0].value;
+
+    mockClientInstance.listCollections.mockResolvedValue([]);
+    mockClientInstance.createCollection.mockResolvedValue({ id: 'col-inbox', name: 'Inbox', description: null });
+    mockClientInstance.createDocument.mockResolvedValue({
+      id: 'doc-inbox-1',
+      title: 'test',
+      text: 'Test content',
+      updatedAt: new Date().toISOString(),
+      collectionId: 'col-inbox',
+      parentDocumentId: null,
+      published: true,
+    });
 
     mockReaderInstance.readVault.mockResolvedValue([{
       path: 'test.md',
@@ -116,8 +128,9 @@ describe('SyncEngine', () => {
 
     const result = await syncEngine.sync();
 
-    expect(result.created).toBe(0);
-    expect(mockClientInstance.createDocument).not.toHaveBeenCalled();
+    expect(mockClientInstance.createCollection).toHaveBeenCalledWith('Inbox');
+    expect(result.created).toBe(1);
+    expect(mockClientInstance.createDocument).toHaveBeenCalledWith('test', 'Test content', 'col-inbox', undefined);
   });
 
   test('should handle sync errors gracefully', async () => {

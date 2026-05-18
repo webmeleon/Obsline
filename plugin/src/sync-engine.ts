@@ -1,4 +1,4 @@
-import { App, TFile, TFolder } from 'obsidian';
+import { App, TFile } from 'obsidian';
 import { createHash } from 'crypto';
 import { OutlineClient } from './outline-client';
 import {
@@ -40,6 +40,7 @@ export class SyncEngine {
   async sync(onProgress?: (msg: string) => void): Promise<SyncResult> {
     const result: SyncResult = { created: 0, updated: 0, deleted: 0, renamed: 0, conflicts: [], errors: [] };
     const state = this.settings.syncState;
+    const lastSyncTime = state.lastSyncTime;
 
     onProgress?.('Reading vault…');
     const vaultNotes = await this.readVault();
@@ -50,27 +51,40 @@ export class SyncEngine {
       this.client.listDocuments(),
     ]);
 
-    onProgress?.('Loading document content…');
+    // Only fetch full content for docs that changed since last sync or are unknown
+    onProgress?.('Loading changed documents…');
     const fullDocs: OutlineDocument[] = [];
     const docById = new Map<string, OutlineDocument>();
     const hashToOutlineId = new Map<string, string>();
 
     for (const doc of outlineDocsList) {
-      try {
-        const full = await this.client.getDocument(doc.id);
-        fullDocs.push(full);
-        docById.set(full.id, full);
-        if (full.text) hashToOutlineId.set(this.hash(full.text), full.id);
-      } catch (e) {
-        result.errors.push(`Failed to load doc ${doc.id}: ${String(e)}`);
+      const isKnown = state.outlineIdMap[doc.id] !== undefined;
+      const changedSinceLastSync = new Date(doc.updatedAt).getTime() > lastSyncTime;
+
+      if (!isKnown || changedSinceLastSync) {
+        // Need full content: either new or changed
+        try {
+          const full = await this.client.getDocument(doc.id);
+          fullDocs.push(full);
+          docById.set(full.id, full);
+          if (full.text) hashToOutlineId.set(this.hash(full.text), full.id);
+        } catch (e) {
+          result.errors.push(`Failed to load doc ${doc.id}: ${String(e)}`);
+        }
+      } else {
+        // Unchanged known doc — use stub (no text needed for Obsidian→Outline direction)
+        const stub: OutlineDocument = { ...doc, text: '' };
+        fullDocs.push(stub);
+        docById.set(doc.id, stub);
       }
     }
 
+    // Ensure collections exist for all vault folders + inbox for root-level notes
     const updatedCollections = await this.ensureCollections(vaultNotes, collections, onProgress);
     const collectionNameById = new Map(updatedCollections.map(c => [c.id, c.name]));
     const collectionIdByName = new Map(updatedCollections.map(c => [c.name, c.id]));
 
-    // (collectionId + title) → doc — used to adopt existing Outline docs instead of creating duplicates
+    // (collectionId::title) → doc — adopt existing instead of duplicating
     const outlineDocByKey = new Map<string, OutlineDocument>();
     for (const doc of fullDocs) {
       outlineDocByKey.set(`${doc.collectionId}::${doc.title}`, doc);
@@ -94,6 +108,7 @@ export class SyncEngine {
         const outlineDoc = knownId ? docById.get(knownId) : undefined;
 
         if (!outlineDoc) {
+          // Rename detection via content hash (only works for fully-loaded docs)
           const noteHash = this.hash(note.content);
           const renamedFromId = hashToOutlineId.get(noteHash);
           const renamedFromPath = renamedFromId ? state.outlineIdMap[renamedFromId] : undefined;
@@ -111,12 +126,12 @@ export class SyncEngine {
             }
           } else {
             const { collectionId, parentDocumentId } = this.collectionFromPath(note.path, collectionIdByName);
-            // Root-level files have no collection — Outline requires one, skip them
             if (!collectionId) {
-              result.errors.push(`Skipped "${note.path}" — move it into a subfolder to sync with Outline`);
+              // Should not happen after ensureCollections adds Inbox, but guard anyway
+              result.errors.push(`No collection for "${note.path}" — skipping`);
               continue;
             }
-            // Adopt existing Outline doc (same collection + title) instead of creating a duplicate
+            // Adopt existing doc (same collection + title) instead of creating a duplicate
             const adoptKey = `${collectionId}::${note.title}`;
             const existing = outlineDocByKey.get(adoptKey);
             if (existing && !state.outlineIdMap[existing.id]) {
@@ -136,22 +151,25 @@ export class SyncEngine {
             }
           }
         } else {
-          const noteHash = this.hash(note.content);
-          const docHash = this.hash(outlineDoc.text);
-          const titleChanged = note.title !== outlineDoc.title;
+          // Known doc — only compare if we have full content (changed since last sync)
+          if (outlineDoc.text !== '') {
+            const noteHash = this.hash(note.content);
+            const docHash = this.hash(outlineDoc.text);
+            const titleChanged = note.title !== outlineDoc.title;
 
-          if (noteHash !== docHash || titleChanged) {
-            const winner = this.resolveConflict(note, outlineDoc);
-            onProgress?.(`Updating: ${note.path}`);
-            try {
-              if (winner === 'obsidian') {
-                await this.client.updateDocument(outlineDoc.id, note.content, note.title);
-              } else {
-                await this.writeNote(note.path, outlineDoc.text);
+            if (noteHash !== docHash || titleChanged) {
+              const winner = this.resolveConflict(note, outlineDoc);
+              onProgress?.(`Updating: ${note.path}`);
+              try {
+                if (winner === 'obsidian') {
+                  await this.client.updateDocument(outlineDoc.id, note.content, note.title);
+                } else {
+                  await this.writeNote(note.path, outlineDoc.text);
+                }
+                result.updated++;
+              } catch (e) {
+                result.errors.push(`Update failed for ${note.path}: ${String(e)}`);
               }
-              result.updated++;
-            } catch (e) {
-              result.errors.push(`Update failed for ${note.path}: ${String(e)}`);
             }
           }
         }
@@ -164,6 +182,9 @@ export class SyncEngine {
 
     if (!firstSync || dir === 'outline-to-obsidian' || dir === 'bidirectional') {
       for (const doc of fullDocs) {
+        // Skip stubs (unchanged known docs) — already in sync
+        if (doc.text === '' && state.outlineIdMap[doc.id]) continue;
+
         const mappedPath = state.outlineIdMap[doc.id];
         if (mappedPath && obsidianMap.has(mappedPath)) continue;
 
@@ -205,9 +226,16 @@ export class SyncEngine {
   ): Promise<OutlineCollection[]> {
     const existingNames = new Set(collections.map(c => c.name));
     const folders = new Set<string>();
+    const hasRootLevelNotes = notes.some(n => !n.path.includes('/'));
+
     for (const note of notes) {
       const parts = note.path.split('/');
       if (parts.length > 1) folders.add(parts[0]);
+    }
+
+    // Inbox collection for root-level notes
+    if (hasRootLevelNotes) {
+      folders.add(this.settings.inboxCollection);
     }
 
     const updated = [...collections];
@@ -267,12 +295,10 @@ export class SyncEngine {
 
   private async ensureFolder(notePath: string): Promise<void> {
     const parts = notePath.split('/');
-    parts.pop(); // remove filename
+    parts.pop();
     if (parts.length === 0) return;
-
     const folderPath = parts.join('/');
-    const existing = this.app.vault.getAbstractFileByPath(folderPath);
-    if (!existing) {
+    if (!this.app.vault.getAbstractFileByPath(folderPath)) {
       await this.app.vault.createFolder(folderPath);
     }
   }
@@ -301,7 +327,11 @@ export class SyncEngine {
     collectionIdByName: Map<string, string>,
   ): { collectionId?: string; parentDocumentId?: string } {
     const parts = notePath.split('/').filter(Boolean);
-    if (parts.length < 2) return {};
+    // Root-level note → use Inbox collection
+    if (parts.length < 2) {
+      const inboxId = collectionIdByName.get(this.settings.inboxCollection);
+      return { collectionId: inboxId };
+    }
     const collectionId = collectionIdByName.get(parts[0]);
     return { collectionId };
   }

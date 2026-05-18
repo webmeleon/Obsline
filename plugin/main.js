@@ -31,6 +31,7 @@ var DEFAULT_SETTINGS = {
   syncInterval: 5,
   conflictResolution: "last-write-wins",
   initialSyncDirection: "bidirectional",
+  inboxCollection: "Inbox",
   ignorePaths: [".obsidian", ".trash", ".DS_Store", "Templates"],
   syncState: {
     lastSyncTime: 0,
@@ -141,6 +142,7 @@ var SyncEngine = class {
   async sync(onProgress) {
     const result = { created: 0, updated: 0, deleted: 0, renamed: 0, conflicts: [], errors: [] };
     const state = this.settings.syncState;
+    const lastSyncTime = state.lastSyncTime;
     onProgress == null ? void 0 : onProgress("Reading vault\u2026");
     const vaultNotes = await this.readVault();
     onProgress == null ? void 0 : onProgress("Fetching Outline data\u2026");
@@ -148,19 +150,27 @@ var SyncEngine = class {
       this.client.listCollections(),
       this.client.listDocuments()
     ]);
-    onProgress == null ? void 0 : onProgress("Loading document content\u2026");
+    onProgress == null ? void 0 : onProgress("Loading changed documents\u2026");
     const fullDocs = [];
     const docById = /* @__PURE__ */ new Map();
     const hashToOutlineId = /* @__PURE__ */ new Map();
     for (const doc of outlineDocsList) {
-      try {
-        const full = await this.client.getDocument(doc.id);
-        fullDocs.push(full);
-        docById.set(full.id, full);
-        if (full.text)
-          hashToOutlineId.set(this.hash(full.text), full.id);
-      } catch (e) {
-        result.errors.push(`Failed to load doc ${doc.id}: ${String(e)}`);
+      const isKnown = state.outlineIdMap[doc.id] !== void 0;
+      const changedSinceLastSync = new Date(doc.updatedAt).getTime() > lastSyncTime;
+      if (!isKnown || changedSinceLastSync) {
+        try {
+          const full = await this.client.getDocument(doc.id);
+          fullDocs.push(full);
+          docById.set(full.id, full);
+          if (full.text)
+            hashToOutlineId.set(this.hash(full.text), full.id);
+        } catch (e) {
+          result.errors.push(`Failed to load doc ${doc.id}: ${String(e)}`);
+        }
+      } else {
+        const stub = { ...doc, text: "" };
+        fullDocs.push(stub);
+        docById.set(doc.id, stub);
       }
     }
     const updatedCollections = await this.ensureCollections(vaultNotes, collections, onProgress);
@@ -201,7 +211,7 @@ var SyncEngine = class {
           } else {
             const { collectionId, parentDocumentId } = this.collectionFromPath(note.path, collectionIdByName);
             if (!collectionId) {
-              result.errors.push(`Skipped "${note.path}" \u2014 move it into a subfolder to sync with Outline`);
+              result.errors.push(`No collection for "${note.path}" \u2014 skipping`);
               continue;
             }
             const adoptKey = `${collectionId}::${note.title}`;
@@ -223,21 +233,23 @@ var SyncEngine = class {
             }
           }
         } else {
-          const noteHash = this.hash(note.content);
-          const docHash = this.hash(outlineDoc.text);
-          const titleChanged = note.title !== outlineDoc.title;
-          if (noteHash !== docHash || titleChanged) {
-            const winner = this.resolveConflict(note, outlineDoc);
-            onProgress == null ? void 0 : onProgress(`Updating: ${note.path}`);
-            try {
-              if (winner === "obsidian") {
-                await this.client.updateDocument(outlineDoc.id, note.content, note.title);
-              } else {
-                await this.writeNote(note.path, outlineDoc.text);
+          if (outlineDoc.text !== "") {
+            const noteHash = this.hash(note.content);
+            const docHash = this.hash(outlineDoc.text);
+            const titleChanged = note.title !== outlineDoc.title;
+            if (noteHash !== docHash || titleChanged) {
+              const winner = this.resolveConflict(note, outlineDoc);
+              onProgress == null ? void 0 : onProgress(`Updating: ${note.path}`);
+              try {
+                if (winner === "obsidian") {
+                  await this.client.updateDocument(outlineDoc.id, note.content, note.title);
+                } else {
+                  await this.writeNote(note.path, outlineDoc.text);
+                }
+                result.updated++;
+              } catch (e) {
+                result.errors.push(`Update failed for ${note.path}: ${String(e)}`);
               }
-              result.updated++;
-            } catch (e) {
-              result.errors.push(`Update failed for ${note.path}: ${String(e)}`);
             }
           }
         }
@@ -246,6 +258,8 @@ var SyncEngine = class {
     }
     if (!firstSync || dir === "outline-to-obsidian" || dir === "bidirectional") {
       for (const doc of fullDocs) {
+        if (doc.text === "" && state.outlineIdMap[doc.id])
+          continue;
         const mappedPath = state.outlineIdMap[doc.id];
         if (mappedPath && obsidianMap.has(mappedPath))
           continue;
@@ -279,10 +293,14 @@ var SyncEngine = class {
   async ensureCollections(notes, collections, onProgress) {
     const existingNames = new Set(collections.map((c) => c.name));
     const folders = /* @__PURE__ */ new Set();
+    const hasRootLevelNotes = notes.some((n) => !n.path.includes("/"));
     for (const note of notes) {
       const parts = note.path.split("/");
       if (parts.length > 1)
         folders.add(parts[0]);
+    }
+    if (hasRootLevelNotes) {
+      folders.add(this.settings.inboxCollection);
     }
     const updated = [...collections];
     for (const folder of folders) {
@@ -338,8 +356,7 @@ var SyncEngine = class {
     if (parts.length === 0)
       return;
     const folderPath = parts.join("/");
-    const existing = this.app.vault.getAbstractFileByPath(folderPath);
-    if (!existing) {
+    if (!this.app.vault.getAbstractFileByPath(folderPath)) {
       await this.app.vault.createFolder(folderPath);
     }
   }
@@ -361,8 +378,10 @@ var SyncEngine = class {
   }
   collectionFromPath(notePath, collectionIdByName) {
     const parts = notePath.split("/").filter(Boolean);
-    if (parts.length < 2)
-      return {};
+    if (parts.length < 2) {
+      const inboxId = collectionIdByName.get(this.settings.inboxCollection);
+      return { collectionId: inboxId };
+    }
     const collectionId = collectionIdByName.get(parts[0]);
     return { collectionId };
   }
@@ -432,6 +451,12 @@ var ObslineSettingTab = class extends import_obsidian3.PluginSettingTab {
     new import_obsidian3.Setting(containerEl).setName("Conflict resolution").setDesc("What to do when both sides changed the same note.").addDropdown(
       (drop) => drop.addOption("last-write-wins", "Last write wins").addOption("obsidian-wins", "Obsidian always wins").addOption("outline-wins", "Outline always wins").setValue(this.plugin.settings.conflictResolution).onChange(async (value) => {
         this.plugin.settings.conflictResolution = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Inbox collection").setDesc("Notes in the vault root (no subfolder) are synced to this Outline collection.").addText(
+      (text) => text.setPlaceholder("Inbox").setValue(this.plugin.settings.inboxCollection).onChange(async (value) => {
+        this.plugin.settings.inboxCollection = value.trim() || "Inbox";
         await this.plugin.saveSettings();
       })
     );

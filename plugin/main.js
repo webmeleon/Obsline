@@ -200,7 +200,11 @@ var SyncEngine = class {
             }
           } else {
             const { collectionId, parentDocumentId } = this.collectionFromPath(note.path, collectionIdByName);
-            const adoptKey = collectionId ? `${collectionId}::${note.title}` : `::${note.title}`;
+            if (!collectionId) {
+              result.errors.push(`Skipped "${note.path}" \u2014 move it into a subfolder to sync with Outline`);
+              continue;
+            }
+            const adoptKey = `${collectionId}::${note.title}`;
             const existing = outlineDocByKey.get(adoptKey);
             if (existing && !state.outlineIdMap[existing.id]) {
               onProgress == null ? void 0 : onProgress(`Adopting existing Outline doc: ${note.path}`);

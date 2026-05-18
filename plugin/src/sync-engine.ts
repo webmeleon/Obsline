@@ -111,8 +111,13 @@ export class SyncEngine {
             }
           } else {
             const { collectionId, parentDocumentId } = this.collectionFromPath(note.path, collectionIdByName);
+            // Root-level files have no collection — Outline requires one, skip them
+            if (!collectionId) {
+              result.errors.push(`Skipped "${note.path}" — move it into a subfolder to sync with Outline`);
+              continue;
+            }
             // Adopt existing Outline doc (same collection + title) instead of creating a duplicate
-            const adoptKey = collectionId ? `${collectionId}::${note.title}` : `::${note.title}`;
+            const adoptKey = `${collectionId}::${note.title}`;
             const existing = outlineDocByKey.get(adoptKey);
             if (existing && !state.outlineIdMap[existing.id]) {
               onProgress?.(`Adopting existing Outline doc: ${note.path}`);

@@ -75,12 +75,12 @@ describe('SyncEngine', () => {
     expect(result.deleted).toBe(0);
   });
 
-  test('should create outline document for new obsidian note', async () => {
+  test('should create outline document for new obsidian note in a folder', async () => {
     const mockReaderInstance = mockObsidianReader.mock.results[0].value;
     const mockClientInstance = mockOutlineClient.mock.results[0].value;
 
     const note = {
-      path: 'test.md',
+      path: 'ToDo/test.md',
       title: 'test',
       content: 'Test content',
       lastModified: Date.now(),
@@ -92,14 +92,32 @@ describe('SyncEngine', () => {
       title: 'test',
       text: 'Test content',
       updatedAt: new Date().toISOString(),
-      collectionId: 'default',
+      collectionId: 'col-1',
       parentDocumentId: null,
+      published: true,
     });
 
     const result = await syncEngine.sync();
 
     expect(result.created).toBe(1);
-    expect(mockClientInstance.createDocument).toHaveBeenCalledWith('test', 'Test content', undefined, undefined);
+    expect(mockClientInstance.createDocument).toHaveBeenCalledWith('test', 'Test content', 'col-1', undefined);
+  });
+
+  test('should skip root-level notes without a collection', async () => {
+    const mockReaderInstance = mockObsidianReader.mock.results[0].value;
+    const mockClientInstance = mockOutlineClient.mock.results[0].value;
+
+    mockReaderInstance.readVault.mockResolvedValue([{
+      path: 'test.md',
+      title: 'test',
+      content: 'Test content',
+      lastModified: Date.now(),
+    }]);
+
+    const result = await syncEngine.sync();
+
+    expect(result.created).toBe(0);
+    expect(mockClientInstance.createDocument).not.toHaveBeenCalled();
   });
 
   test('should handle sync errors gracefully', async () => {

@@ -68,11 +68,16 @@ describe('SyncEngine', () => {
   });
 
   test('should sync empty vault and outline', async () => {
-    const result = await syncEngine.sync();
-
-    expect(result.created).toBe(0);
-    expect(result.updated).toBe(0);
-    expect(result.deleted).toBe(0);
+    const originalHome = process.env.HOME;
+    process.env.HOME = tempVault;
+    try {
+      const result = await syncEngine.sync();
+      expect(result.created).toBe(0);
+      expect(result.updated).toBe(0);
+      expect(result.deleted).toBe(0);
+    } finally {
+      process.env.HOME = originalHome;
+    }
   });
 
   test('should create outline document for new obsidian note in a folder', async () => {

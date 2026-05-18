@@ -145,9 +145,15 @@ export class SyncEngine {
       }
     }
 
+    const obsidianMap = new Map(obsidianNotes.map(n => [n.path, n]));
+    const outlineIdSet = new Set(outlineDocuments.map(d => d.id));
+
+    // Snapshot keys before any state mutations so rename detection can release them first
+    const knownPaths = Object.keys(this.syncState.pathToOutlineId);
+    const knownIds = Object.keys(this.syncState.outlineIdMap);
+
     // ── Obsidian → Outline ──────────────────────────────────────────────────
     // Sort by path depth so parent flat-files are processed before their children
-    const obsidianMap = new Map(obsidianNotes.map(n => [n.path, n]));
     const sortedNotes = [...obsidianNotes].sort(
       (a, b) => a.path.split('/').length - b.path.split('/').length
     );
@@ -212,7 +218,7 @@ export class SyncEngine {
       this.syncState.fileHashes[note.path] = this.hashContent(note.content);
     }
 
-    // ── Outline → Obsidian ──────────────────────────────────────────────────
+    // ── Outline → Obsidian (create/update) ─────────────────────────────────
 
     for (const outlineDoc of fullOutlineDocs) {
       const notePath = this.buildObsidianPath(outlineDoc, collectionNameById, docById);
@@ -237,6 +243,42 @@ export class SyncEngine {
         this.syncState.outlineIdMap[outlineDoc.id] = notePath;
         this.syncState.pathToOutlineId[notePath] = outlineDoc.id;
         pathToOutlineIds.set(notePath, [outlineDoc.id]);
+      }
+    }
+
+    // ── Deletions: Obsidian → Outline ──────────────────────────────────────
+    // Uses snapshot keys; rename detection above may have cleared a path from state,
+    // so we re-check state[obsPath] before acting.
+    for (const obsPath of knownPaths) {
+      const outlineId = this.syncState.pathToOutlineId[obsPath];
+      if (outlineId && !obsidianMap.has(obsPath)) {
+        this.logger.info(`Obsidian deleted "${obsPath}" — deleting Outline doc ${outlineId}`);
+        try {
+          await this.outlineClient.deleteDocument(outlineId);
+        } catch (e) {
+          this.logger.warn(`Delete Outline doc failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        delete this.syncState.outlineIdMap[outlineId];
+        delete this.syncState.pathToOutlineId[obsPath];
+        delete this.syncState.fileHashes[obsPath];
+        result.deleted++;
+      }
+    }
+
+    // ── Deletions: Outline → Obsidian ──────────────────────────────────────
+    for (const outlineId of knownIds) {
+      const obsPath = this.syncState.outlineIdMap[outlineId];
+      if (obsPath && !outlineIdSet.has(outlineId)) {
+        this.logger.info(`Outline deleted doc ${outlineId} — deleting Obsidian file "${obsPath}"`);
+        try {
+          await this.obsidianReader.deleteNote(obsPath);
+        } catch (e) {
+          this.logger.warn(`Delete Obsidian file failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        delete this.syncState.outlineIdMap[outlineId];
+        delete this.syncState.pathToOutlineId[obsPath];
+        delete this.syncState.fileHashes[obsPath];
+        result.deleted++;
       }
     }
 

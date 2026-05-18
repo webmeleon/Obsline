@@ -313,8 +313,10 @@ var SyncEngine = class {
         onProgress == null ? void 0 : onProgress(`Outline deleted doc \u2014 removing Obsidian file "${obsPath}"`);
         try {
           const file = this.app.vault.getAbstractFileByPath(obsPath);
-          if (file instanceof import_obsidian2.TFile)
+          if (file instanceof import_obsidian2.TFile) {
             await this.app.vault.delete(file);
+            await this.pruneEmptyFolders(obsPath);
+          }
         } catch (e) {
           result.errors.push(`Delete Obsidian file failed for "${obsPath}": ${String(e)}`);
         }
@@ -452,6 +454,18 @@ var SyncEngine = class {
       return "outline";
     const outlineTime = new Date(doc.updatedAt).getTime();
     return note.lastModified > outlineTime ? "obsidian" : "outline";
+  }
+  async pruneEmptyFolders(filePath) {
+    const parts = filePath.split("/");
+    for (let i = parts.length - 1; i > 0; i--) {
+      const folderPath = parts.slice(0, i).join("/");
+      const folder = this.app.vault.getAbstractFileByPath(folderPath);
+      if (folder && "children" in folder && folder.children.length === 0) {
+        await this.app.vault.delete(folder);
+      } else {
+        break;
+      }
+    }
   }
   hash(content) {
     return (0, import_crypto.createHash)("md5").update(content).digest("hex");

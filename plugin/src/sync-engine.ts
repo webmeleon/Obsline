@@ -246,7 +246,10 @@ export class SyncEngine {
         onProgress?.(`Outline deleted doc — removing Obsidian file "${obsPath}"`);
         try {
           const file = this.app.vault.getAbstractFileByPath(obsPath);
-          if (file instanceof TFile) await this.app.vault.delete(file);
+          if (file instanceof TFile) {
+            await this.app.vault.delete(file);
+            await this.pruneEmptyFolders(obsPath);
+          }
         } catch (e) {
           result.errors.push(`Delete Obsidian file failed for "${obsPath}": ${String(e)}`);
         }
@@ -412,6 +415,19 @@ export class SyncEngine {
     if (this.settings.conflictResolution === 'outline-wins') return 'outline';
     const outlineTime = new Date(doc.updatedAt).getTime();
     return note.lastModified > outlineTime ? 'obsidian' : 'outline';
+  }
+
+  private async pruneEmptyFolders(filePath: string): Promise<void> {
+    const parts = filePath.split('/');
+    for (let i = parts.length - 1; i > 0; i--) {
+      const folderPath = parts.slice(0, i).join('/');
+      const folder = this.app.vault.getAbstractFileByPath(folderPath);
+      if (folder && 'children' in folder && (folder as any).children.length === 0) {
+        await this.app.vault.delete(folder as any);
+      } else {
+        break;
+      }
+    }
   }
 
   private hash(content: string): string {

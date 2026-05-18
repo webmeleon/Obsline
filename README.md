@@ -6,7 +6,9 @@ Bi-directional sync between [Obsidian](https://obsidian.md) and a self-hosted [O
 
 - **Obsidian Plugin** — native integration with sync-on-change or interval-based sync
 - **CLI Tool** — optional command-line interface for scripting and headless use
+- **Nested documents** — Outline sub-notes map to subfolders in Obsidian (coexistence pattern)
 - **Collection → Folder mapping** — Outline collections appear as top-level folders in Obsidian
+- **Inbox collection** — root-level vault notes sync to a configurable Inbox collection
 - **Rename detection** — content-hash based rename tracking (no duplicates)
 - **Auto-collection creation** — new Obsidian folders automatically create Outline collections
 - **Conflict resolution** — last-write-wins, Obsidian-wins, or Outline-wins
@@ -19,33 +21,34 @@ Bi-directional sync between [Obsidian](https://obsidian.md) and a self-hosted [O
 
 ### Installation
 
-1. **Build the plugin**
+**Option A — Download release (no build required)**
+
+1. Download `obsline-v0.2.0.zip` from the [latest release](https://github.com/webmeleon/Obsline/releases/latest)
+2. Unzip and run the install script:
 
    ```bash
-   cd plugin
-   npm install
-   npm run build
+   # macOS / Linux
+   ./install.sh /path/to/your/obsidian/vault
    ```
 
-2. **Copy to your vault**
-
-   ```bash
-   # macOS/Linux
-   VAULT=~/Documents/Obsidian/MyVault
-   mkdir -p "$VAULT/.obsidian/plugins/obsline"
-   cp plugin/main.js plugin/manifest.json plugin/styles.css "$VAULT/.obsidian/plugins/obsline/"
-   ```
-
-   On Windows (PowerShell):
    ```powershell
-   $VAULT = "$env:USERPROFILE\Documents\Obsidian\MyVault"
-   New-Item -ItemType Directory -Force "$VAULT\.obsidian\plugins\obsline"
-   Copy-Item plugin\main.js, plugin\manifest.json, plugin\styles.css "$VAULT\.obsidian\plugins\obsline\"
+   # Windows (PowerShell)
+   .\install.ps1 -Vault "C:\path\to\your\obsidian\vault"
    ```
 
-3. **Enable in Obsidian**
+   Or copy `main.js`, `manifest.json`, `styles.css` manually into:
+   `<vault>/.obsidian/plugins/obsline/`
 
-   Settings → Community plugins → enable **Obsline – Outline Sync**
+3. Restart Obsidian and enable **Obsline – Outline Sync** under Settings → Community plugins
+
+**Option B — Build from source**
+
+```bash
+cd plugin
+npm install
+npm run build
+./install.sh /path/to/your/obsidian/vault
+```
 
 ### Configuration
 
@@ -57,6 +60,7 @@ Open **Settings → Obsline – Outline Sync** and fill in:
 | API key | See instructions below |
 | Sync trigger | On change (30 s debounce) or every 1–30 min |
 | Conflict resolution | Last-write-wins / Obsidian-wins / Outline-wins |
+| Inbox collection | Collection for root-level vault notes (default: `Inbox`) |
 | First-sync direction | Which side wins on the very first sync |
 | Ignored paths | Folders/files to exclude (e.g. `Templates, Attachments`) |
 
@@ -74,24 +78,36 @@ Open **Settings → Obsline – Outline Sync** and fill in:
 
 After the first sync the direction is always bidirectional.
 
+### Folder structure
+
+Outline's document hierarchy maps to Obsidian using a coexistence pattern:
+
+```
+Outline:                    Obsidian:
+Projects                    Projects/
+  Website          →          Website.md        ← parent content
+    Design         →          Website/
+    Mockups        →            Design.md
+                                Mockups.md
+```
+
+Parent notes stay flat. Children appear in a same-named subfolder.
+
 ---
 
 ## CLI Tool
 
 ```bash
-# Install dependencies
 npm install
 
-# Configure (edit ~/.obsline/config.json)
-npm run dev config
+# Configure
+npm run dev config       # creates ~/.obsline/config.json
 
-# Run a one-off sync
-npm run dev sync
+# Sync
+npm run dev sync         # one-off sync
+npm run dev sync --daemon  # polling daemon (default: every 5 min)
 
-# Run as daemon (polls every 5 min by default)
-npm run dev sync --daemon
-
-# Show status
+# Status
 npm run dev status
 ```
 
@@ -115,14 +131,15 @@ npm run dev status
 ```bash
 # CLI tool
 npm install
-npm test           # Run all tests (43 tests)
-npm run dev sync   # Test sync against real Outline
+npm test                 # Run all tests
+npm run dev sync         # Test against real Outline
 
 # Obsidian plugin
 cd plugin
 npm install
-npm run dev        # Watch mode — rebuilds on change
-npm run build      # Production build
+npm run dev              # Watch mode
+npm run build            # Production build
+npm run release          # Build + create releases/obsline-vX.Y.Z.zip
 ```
 
 ### Architecture
@@ -140,15 +157,19 @@ obsline/
 │   ├── index.ts           # CLI entry point
 │   └── version.ts         # Shared version constant
 ├── plugin/            # Obsidian plugin (esbuild bundle)
-│   └── src/
-│       ├── main.ts          # Plugin lifecycle
-│       ├── settings.ts      # Settings UI tab
-│       ├── sync-engine.ts   # Sync engine (Obsidian Vault API)
-│       ├── outline-client.ts # Outline REST client (requestUrl)
-│       └── types.ts         # Shared types
+│   ├── src/
+│   │   ├── main.ts          # Plugin lifecycle
+│   │   ├── settings.ts      # Settings UI
+│   │   ├── sync-engine.ts   # Sync engine (Obsidian Vault API)
+│   │   ├── outline-client.ts # Outline REST client (requestUrl)
+│   │   └── types.ts         # Shared types
+│   ├── install.sh           # Mac/Linux installer
+│   └── install.ps1          # Windows installer
+├── scripts/
+│   └── package-plugin.mjs  # Creates release ZIP
 └── tests/             # Jest tests
 ```
 
 ## License
 
-MIT
+MIT — Copyright (c) 2026 Marvin Schill

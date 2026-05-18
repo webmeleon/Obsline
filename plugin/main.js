@@ -173,6 +173,11 @@ var SyncEngine = class {
         docById.set(doc.id, stub);
       }
     }
+    const parentDocIds = /* @__PURE__ */ new Set();
+    for (const doc of fullDocs) {
+      if (doc.parentDocumentId)
+        parentDocIds.add(doc.parentDocumentId);
+    }
     const updatedCollections = await this.ensureCollections(vaultNotes, collections, onProgress);
     const collectionNameById = new Map(updatedCollections.map((c) => [c.id, c.name]));
     const collectionIdByName = new Map(updatedCollections.map((c) => [c.name, c.id]));
@@ -190,7 +195,20 @@ var SyncEngine = class {
     const firstSync = !state.firstSyncDone;
     const dir = this.settings.initialSyncDirection;
     if (!firstSync || dir === "obsidian-to-outline" || dir === "bidirectional") {
-      for (const note of vaultNotes) {
+      const sortedNotes = [...vaultNotes].sort((a, b) => {
+        const pa = a.path.split("/");
+        const pb = b.path.split("/");
+        if (pa.length !== pb.length)
+          return pa.length - pb.length;
+        const isIndexA = pa[pa.length - 1].replace(/\.md$/, "") === pa[pa.length - 2];
+        const isIndexB = pb[pb.length - 1].replace(/\.md$/, "") === pb[pb.length - 2];
+        if (isIndexA && !isIndexB)
+          return -1;
+        if (!isIndexA && isIndexB)
+          return 1;
+        return 0;
+      });
+      for (const note of sortedNotes) {
         const knownId = state.pathToOutlineId[note.path];
         const outlineDoc = knownId ? docById.get(knownId) : void 0;
         if (!outlineDoc) {
@@ -209,7 +227,7 @@ var SyncEngine = class {
               result.errors.push(`Rename failed: ${String(e)}`);
             }
           } else {
-            const { collectionId, parentDocumentId } = this.collectionFromPath(note.path, collectionIdByName);
+            const { collectionId, parentDocumentId } = this.collectionFromPath(note.path, collectionIdByName, state);
             if (!collectionId) {
               result.errors.push(`No collection for "${note.path}" \u2014 skipping`);
               continue;
@@ -258,12 +276,26 @@ var SyncEngine = class {
     }
     if (!firstSync || dir === "outline-to-obsidian" || dir === "bidirectional") {
       for (const doc of fullDocs) {
-        if (doc.text === "" && state.outlineIdMap[doc.id])
-          continue;
+        const notePath = this.buildPath(doc, collectionNameById, docById, parentDocIds);
         const mappedPath = state.outlineIdMap[doc.id];
+        if (mappedPath && mappedPath !== notePath) {
+          onProgress == null ? void 0 : onProgress(`Path changed: "${mappedPath}" \u2192 "${notePath}"`);
+          const existingFile = this.app.vault.getAbstractFileByPath(mappedPath);
+          if (existingFile instanceof import_obsidian2.TFile) {
+            const content = doc.text || await this.app.vault.read(existingFile);
+            await this.writeNote(notePath, content);
+            await this.app.vault.delete(existingFile);
+          }
+          state.outlineIdMap[doc.id] = notePath;
+          delete state.pathToOutlineId[mappedPath];
+          state.pathToOutlineId[notePath] = doc.id;
+          result.updated++;
+          continue;
+        }
         if (mappedPath && obsidianMap.has(mappedPath))
           continue;
-        const notePath = this.buildPath(doc, collectionNameById, docById);
+        if (doc.text === "" && mappedPath)
+          continue;
         const existingIds = pathToOutlineIds.get(notePath) || [];
         if (existingIds.length > 0) {
           state.outlineIdMap[doc.id] = notePath;
@@ -360,7 +392,12 @@ var SyncEngine = class {
       await this.app.vault.createFolder(folderPath);
     }
   }
-  buildPath(doc, collectionNameById, docById) {
+  /**
+   * Build the Obsidian file path for an Outline document.
+   * Docs that have children use the index-file pattern: Folder/Folder.md
+   * to avoid a file/folder conflict on the filesystem.
+   */
+  buildPath(doc, collectionNameById, docById, parentDocIds) {
     var _a;
     const parts = [];
     let parentId = doc.parentDocumentId;
@@ -373,17 +410,41 @@ var SyncEngine = class {
     }
     const collectionName = (_a = collectionNameById.get(doc.collectionId)) != null ? _a : "Unsorted";
     parts.unshift(collectionName);
-    parts.push(`${doc.title}.md`);
+    if (parentDocIds.has(doc.id)) {
+      parts.push(doc.title);
+      parts.push(`${doc.title}.md`);
+    } else {
+      parts.push(`${doc.title}.md`);
+    }
     return parts.join("/");
   }
-  collectionFromPath(notePath, collectionIdByName) {
+  /**
+   * Resolve the Outline collection and parentDocumentId for an Obsidian path.
+   *
+   * Collection/Note.md              → { collectionId }
+   * Collection/Folder/Note.md       → { collectionId, parentDocumentId: Folder doc ID }
+   * Collection/Folder/Folder.md     → { collectionId }  (index file = Folder doc itself)
+   * Note.md (root)                  → { collectionId: Inbox }
+   */
+  collectionFromPath(notePath, collectionIdByName, state) {
     const parts = notePath.split("/").filter(Boolean);
     if (parts.length < 2) {
-      const inboxId = collectionIdByName.get(this.settings.inboxCollection);
-      return { collectionId: inboxId };
+      return { collectionId: collectionIdByName.get(this.settings.inboxCollection) };
     }
     const collectionId = collectionIdByName.get(parts[0]);
-    return { collectionId };
+    if (!collectionId)
+      return {};
+    if (parts.length === 2) {
+      return { collectionId };
+    }
+    const filename = parts[parts.length - 1].replace(/\.md$/, "");
+    const parentFolderName = parts[parts.length - 2];
+    if (filename === parentFolderName) {
+      return { collectionId };
+    }
+    const parentIndexPath = [...parts.slice(0, -1), `${parentFolderName}.md`].join("/");
+    const parentDocId = state.pathToOutlineId[parentIndexPath];
+    return { collectionId, parentDocumentId: parentDocId };
   }
   resolveConflict(note, doc) {
     if (this.settings.conflictResolution === "obsidian-wins")
@@ -410,6 +471,10 @@ var ObslineSettingTab = class extends import_obsidian3.PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "Obsline \u2013 Outline Sync" });
     containerEl.createEl("h3", { text: "Outline Connection" });
+    containerEl.createEl("p", {
+      text: "The sync covers all collections and documents visible to the API token owner \u2014 including collections shared via group permissions.",
+      cls: "setting-item-description"
+    });
     new import_obsidian3.Setting(containerEl).setName("Outline server URL").setDesc("The base URL of your Outline instance (e.g. https://notes.example.com)").addText(
       (text) => text.setPlaceholder("https://notes.example.com").setValue(this.plugin.settings.outlineUrl).onChange(async (value) => {
         this.plugin.settings.outlineUrl = value.trim();

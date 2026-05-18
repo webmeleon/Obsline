@@ -9,10 +9,8 @@ import { Logger } from '../utils/logger';
 interface SyncState {
   lastSyncTime: number;
   fileHashes: Record<string, string>;
-  // outlineId -> obsidianPath
-  outlineIdMap: Record<string, string>;
-  // obsidianPath -> outlineId (for rename detection)
-  pathToOutlineId: Record<string, string>;
+  outlineIdMap: Record<string, string>;   // outlineId → obsidianPath
+  pathToOutlineId: Record<string, string>; // obsidianPath → outlineId
 }
 
 interface SyncResult {
@@ -54,12 +52,7 @@ export class SyncEngine {
         this.outlineClient.listCollections(),
       ]);
 
-      // Create missing collections for new Obsidian folders
-      const updatedCollections = await this.ensureCollectionsForFolders(
-        obsidianNotes,
-        collections
-      );
-
+      const updatedCollections = await this.ensureCollectionsForFolders(obsidianNotes, collections);
       const result = await this.syncBidirectional(obsidianNotes, outlineDocuments, updatedCollections);
 
       await this.saveSyncState();
@@ -93,7 +86,6 @@ export class SyncEngine {
       if (parts.length > 1) vaultFolders.add(parts[0]);
     }
 
-    // Inbox collection for root-level notes
     if (hasRootLevelNotes) vaultFolders.add('Inbox');
 
     const updated = [...collections];
@@ -119,18 +111,17 @@ export class SyncEngine {
     const collectionNameById = new Map(collections.map(c => [c.id, c.name]));
     const collectionIdByName = new Map(collections.map(c => [c.name, c.id]));
 
-    // Build reverse path → outlineIds map (for duplicate prevention)
     const pathToOutlineIds = new Map<string, string[]>();
     for (const [outlineId, obsidianPath] of Object.entries(this.syncState.outlineIdMap)) {
       if (!pathToOutlineIds.has(obsidianPath)) pathToOutlineIds.set(obsidianPath, []);
       pathToOutlineIds.get(obsidianPath)!.push(outlineId);
     }
 
-    // Only fetch full content for docs that changed since last sync or are unknown
+    // Only fetch full content for new or changed docs
     const fullOutlineDocs: OutlineDocument[] = [];
     const docById = new Map<string, OutlineDocument>();
     const hashToOutlineId = new Map<string, string>();
-    const outlineDocByKey = new Map<string, OutlineDocument>();
+    const outlineDocByKey = new Map<string, OutlineDocument>(); // collectionId::title → doc
 
     for (const doc of outlineDocuments) {
       const isKnown = this.syncState.outlineIdMap[doc.id] !== undefined;
@@ -147,32 +138,46 @@ export class SyncEngine {
           this.logger.warn(`Failed to load document ${doc.id}: ${error instanceof Error ? error.message : String(error)}`);
         }
       } else {
-        // Unchanged known doc — stub, no content needed
         const stub: OutlineDocument = { ...doc, text: '' };
         fullOutlineDocs.push(stub);
         docById.set(doc.id, stub);
+        outlineDocByKey.set(`${doc.collectionId}::${doc.title}`, stub);
       }
     }
 
+    // Docs that are referenced as parentDocumentId by others → they have children
+    const parentDocIds = new Set<string>();
+    for (const doc of fullOutlineDocs) {
+      if (doc.parentDocumentId) parentDocIds.add(doc.parentDocumentId);
+    }
+
     // ── Obsidian → Outline ──────────────────────────────────────────────────
-
+    // Sort by path depth so parent index-files are processed before their children
     const obsidianMap = new Map(obsidianNotes.map(n => [n.path, n]));
+    const sortedNotes = [...obsidianNotes].sort((a, b) => {
+      const pa = a.path.split('/');
+      const pb = b.path.split('/');
+      if (pa.length !== pb.length) return pa.length - pb.length;
+      // At equal depth, index-files (filename == parent folder) come first
+      const isIndexA = pa[pa.length - 1].replace(/\.md$/, '') === pa[pa.length - 2];
+      const isIndexB = pb[pb.length - 1].replace(/\.md$/, '') === pb[pb.length - 2];
+      if (isIndexA && !isIndexB) return -1;
+      if (!isIndexA && isIndexB) return 1;
+      return 0;
+    });
 
-    for (const note of obsidianNotes) {
+    for (const note of sortedNotes) {
       const knownOutlineId = this.syncState.pathToOutlineId[note.path];
       const outlineDoc = knownOutlineId ? docById.get(knownOutlineId) : undefined;
 
       if (!outlineDoc) {
-        // Check if this is a rename: same content hash already exists in Outline
         const noteHash = this.hashContent(note.content);
         const renamedFromId = hashToOutlineId.get(noteHash);
         const renamedFromPath = renamedFromId ? this.syncState.outlineIdMap[renamedFromId] : undefined;
 
         if (renamedFromId && renamedFromPath && renamedFromPath !== note.path) {
-          // Rename detected: update title in Outline, update mappings
           this.logger.info(`Rename detected: "${renamedFromPath}" → "${note.path}"`);
           await this.outlineClient.updateDocument(renamedFromId, note.content, note.title);
-          delete this.syncState.outlineIdMap[renamedFromId];
           this.syncState.outlineIdMap[renamedFromId] = note.path;
           this.syncState.pathToOutlineId[note.path] = renamedFromId;
           delete this.syncState.pathToOutlineId[renamedFromPath];
@@ -181,12 +186,12 @@ export class SyncEngine {
           const { collectionId, parentDocumentId } = this.extractCollectionAndParentFromPath(
             note.path, collectionIdByName
           );
-          // Root-level files have no collection — Outline requires one, skip them
           if (!collectionId) {
-            this.logger.warn(`Skipping "${note.path}" — move it into a subfolder to sync with Outline`);
+            this.logger.warn(`No collection for "${note.path}" — skipping`);
             continue;
           }
-          // Adopt existing Outline doc (same collection + title) instead of creating a duplicate
+
+          // Adopt existing doc instead of duplicating (index file = same doc as flat)
           const adoptKey = `${collectionId}::${note.title}`;
           const existing = outlineDocByKey.get(adoptKey);
           if (existing && !this.syncState.outlineIdMap[existing.id]) {
@@ -203,7 +208,6 @@ export class SyncEngine {
           }
         }
       } else if (outlineDoc.text !== '') {
-        // Known doc with full content loaded — check for changes
         const noteHash = this.hashContent(note.content);
         const outlineHash = this.hashContent(outlineDoc.text);
         const titleChanged = note.title !== outlineDoc.title;
@@ -212,11 +216,10 @@ export class SyncEngine {
           const resolvedNote = this.resolveConflict(note, outlineDoc);
           if (resolvedNote === note) {
             await this.outlineClient.updateDocument(outlineDoc.id, note.content, note.title);
-            result.updated++;
           } else {
             await this.obsidianReader.writeNote(note.path, resolvedNote.content);
-            result.updated++;
           }
+          result.updated++;
         }
       }
 
@@ -226,17 +229,32 @@ export class SyncEngine {
     // ── Outline → Obsidian ──────────────────────────────────────────────────
 
     for (const outlineDoc of fullOutlineDocs) {
-      // Skip stubs (unchanged known docs) — already in sync
-      if (outlineDoc.text === '' && this.syncState.outlineIdMap[outlineDoc.id]) continue;
-
+      const notePath = this.buildObsidianPath(outlineDoc, collectionNameById, docById, parentDocIds);
       const mappedPath = this.syncState.outlineIdMap[outlineDoc.id];
+
+      // Handle path change: doc gained or lost children (flat ↔ index-file)
+      if (mappedPath && mappedPath !== notePath) {
+        this.logger.info(`Path changed: "${mappedPath}" → "${notePath}"`);
+        if (await this.obsidianReader.noteExists(mappedPath)) {
+          const content = outlineDoc.text ||
+            await fs.readFile(path.join(this.config.obsidianVault, mappedPath), 'utf-8');
+          await this.obsidianReader.writeNote(notePath, content);
+          await this.obsidianReader.deleteNote(mappedPath);
+        }
+        this.syncState.outlineIdMap[outlineDoc.id] = notePath;
+        delete this.syncState.pathToOutlineId[mappedPath];
+        this.syncState.pathToOutlineId[notePath] = outlineDoc.id;
+        result.updated++;
+        continue;
+      }
+
       if (mappedPath && obsidianMap.has(mappedPath)) continue;
 
-      const notePath = this.buildObsidianPath(outlineDoc, collectionNameById, docById);
-      const existingIds = pathToOutlineIds.get(notePath) || [];
+      // Stubs that are already known — skip
+      if (outlineDoc.text === '' && mappedPath) continue;
 
+      const existingIds = pathToOutlineIds.get(notePath) || [];
       if (existingIds.length > 0) {
-        // Path already mapped — just update state entry
         this.syncState.outlineIdMap[outlineDoc.id] = notePath;
         this.syncState.pathToOutlineId[notePath] = outlineDoc.id;
       } else if (!await this.obsidianReader.noteExists(notePath)) {
@@ -246,7 +264,6 @@ export class SyncEngine {
         pathToOutlineIds.set(notePath, [outlineDoc.id]);
         result.created++;
       } else {
-        // File exists on disk but wasn't in state — adopt it
         this.syncState.outlineIdMap[outlineDoc.id] = notePath;
         this.syncState.pathToOutlineId[notePath] = outlineDoc.id;
         pathToOutlineIds.set(notePath, [outlineDoc.id]);
@@ -256,10 +273,16 @@ export class SyncEngine {
     return result;
   }
 
+  /**
+   * Build the Obsidian file path for an Outline document.
+   * Docs that have children use the index-file pattern: Folder/Folder.md
+   * to avoid a file/folder conflict on the filesystem.
+   */
   private buildObsidianPath(
     doc: OutlineDocument,
     collectionNameById: Map<string, string>,
-    docById: Map<string, OutlineDocument>
+    docById: Map<string, OutlineDocument>,
+    parentDocIds: Set<string>
   ): string {
     const parts: string[] = [];
 
@@ -273,27 +296,63 @@ export class SyncEngine {
 
     const collectionName = collectionNameById.get(doc.collectionId) ?? 'Unsorted';
     parts.unshift(collectionName);
-    parts.push(`${doc.title}.md`);
+
+    if (parentDocIds.has(doc.id)) {
+      // This doc has children → index file inside its own folder
+      parts.push(doc.title);
+      parts.push(`${doc.title}.md`);
+    } else {
+      parts.push(`${doc.title}.md`);
+    }
 
     return parts.join('/');
   }
 
+  /**
+   * Resolve the Outline collection and parentDocumentId for an Obsidian path.
+   *
+   * Collection/Note.md              → { collectionId }
+   * Collection/Folder/Note.md       → { collectionId, parentDocumentId: Folder doc ID }
+   * Collection/Folder/Folder.md     → { collectionId }  (index file = Folder doc itself)
+   * Note.md (root)                  → { collectionId: Inbox }
+   */
   private extractCollectionAndParentFromPath(
     notePath: string,
     collectionIdByName: Map<string, string>
   ): { collectionId?: string; parentDocumentId?: string } {
     const parts = notePath.split('/').filter(p => p);
+
     if (parts.length < 2) {
-      // Root-level file → Inbox collection
       return { collectionId: collectionIdByName.get('Inbox') };
     }
 
     const collectionId = collectionIdByName.get(parts[0]);
     if (!collectionId) {
       this.logger.warn(`No collection found for folder "${parts[0]}" in path ${notePath}`);
+      return {};
     }
 
-    return { collectionId };
+    if (parts.length === 2) {
+      return { collectionId };
+    }
+
+    // Deep path: Collection/[...folders/]Note.md
+    const filename = parts[parts.length - 1].replace(/\.md$/, '');
+    const parentFolderName = parts[parts.length - 2];
+
+    // Index file: Collection/Folder/Folder.md → this IS the Folder doc, no parent
+    if (filename === parentFolderName) {
+      return { collectionId };
+    }
+
+    // Look up parent doc via its index-file path in state
+    const parentIndexPath = [...parts.slice(0, -1), `${parentFolderName}.md`].join('/');
+    const parentDocId = this.syncState.pathToOutlineId[parentIndexPath];
+    if (!parentDocId) {
+      this.logger.warn(`Parent doc for "${notePath}" not in state (${parentIndexPath})`);
+    }
+
+    return { collectionId, parentDocumentId: parentDocId };
   }
 
   private resolveConflict(note: ObsidianNote, outlineDoc: OutlineDocument): ObsidianNote {
@@ -301,7 +360,6 @@ export class SyncEngine {
     if (this.config.conflictResolution === 'outline-wins') {
       return { ...note, content: outlineDoc.text, lastModified: new Date(outlineDoc.updatedAt).getTime() };
     }
-    // last-write-wins
     const outlineTime = new Date(outlineDoc.updatedAt).getTime();
     return note.lastModified > outlineTime
       ? note
@@ -321,7 +379,6 @@ export class SyncEngine {
           lastSyncTime: raw.lastSyncTime ?? 0,
           fileHashes: raw.fileHashes ?? {},
           outlineIdMap: raw.outlineIdMap ?? {},
-          // Rebuild pathToOutlineId from outlineIdMap if missing (migration)
           pathToOutlineId: raw.pathToOutlineId ??
             Object.fromEntries(Object.entries(raw.outlineIdMap ?? {}).map(([id, p]) => [p, id])),
         };

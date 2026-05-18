@@ -270,4 +270,117 @@ describe('SyncEngine', () => {
       process.env.HOME = originalHome;
     }
   });
+
+  test('should set parentDocumentId for nested Obsidian notes', async () => {
+    const mockReaderInstance = mockObsidianReader.mock.results[0].value;
+    const mockClientInstance = mockOutlineClient.mock.results[0].value;
+
+    const originalHome = process.env.HOME;
+    process.env.HOME = tempVault;
+
+    try {
+      // Index file (parent doc) is created first due to depth sorting
+      const parentNote = {
+        path: 'ToDo/Website/Website.md',
+        title: 'Website',
+        content: 'Website overview',
+        lastModified: Date.now(),
+      };
+      const childNote = {
+        path: 'ToDo/Website/Design.md',
+        title: 'Design',
+        content: 'Design content',
+        lastModified: Date.now(),
+      };
+
+      mockReaderInstance.readVault.mockResolvedValue([childNote, parentNote]); // unsorted order
+
+      const parentDocId = 'doc-website';
+      mockClientInstance.createDocument
+        .mockResolvedValueOnce({
+          id: parentDocId,
+          title: 'Website',
+          text: 'Website overview',
+          updatedAt: new Date().toISOString(),
+          collectionId: 'col-1',
+          parentDocumentId: null,
+          published: true,
+        })
+        .mockResolvedValueOnce({
+          id: 'doc-design',
+          title: 'Design',
+          text: 'Design content',
+          updatedAt: new Date().toISOString(),
+          collectionId: 'col-1',
+          parentDocumentId: parentDocId,
+          published: true,
+        });
+
+      const result = await syncEngine.sync();
+
+      expect(result.created).toBe(2);
+      // Parent (index-file) must be created first, without parentDocumentId
+      expect(mockClientInstance.createDocument).toHaveBeenNthCalledWith(
+        1, 'Website', 'Website overview', 'col-1', undefined,
+      );
+      // Child must reference parent
+      expect(mockClientInstance.createDocument).toHaveBeenNthCalledWith(
+        2, 'Design', 'Design content', 'col-1', parentDocId,
+      );
+    } finally {
+      process.env.HOME = originalHome;
+    }
+  });
+
+  test('should build index-file path for Outline docs that have children', async () => {
+    const mockReaderInstance = mockObsidianReader.mock.results[0].value;
+    const mockClientInstance = mockOutlineClient.mock.results[0].value;
+
+    const originalHome = process.env.HOME;
+    process.env.HOME = tempVault;
+
+    try {
+      mockReaderInstance.readVault.mockResolvedValue([]);
+      mockReaderInstance.noteExists.mockResolvedValue(false);
+      mockReaderInstance.writeNote.mockResolvedValue(undefined);
+
+      const parentDoc = {
+        id: 'doc-parent',
+        title: 'Website',
+        text: 'Parent content',
+        updatedAt: new Date().toISOString(),
+        collectionId: 'col-1',
+        parentDocumentId: null,
+        published: true,
+      };
+      const childDoc = {
+        id: 'doc-child',
+        title: 'Design',
+        text: 'Child content',
+        updatedAt: new Date().toISOString(),
+        collectionId: 'col-1',
+        parentDocumentId: 'doc-parent',
+        published: true,
+      };
+
+      mockClientInstance.listDocuments.mockResolvedValue([parentDoc, childDoc]);
+      mockClientInstance.getDocument
+        .mockResolvedValueOnce(parentDoc)
+        .mockResolvedValueOnce(childDoc);
+
+      const result = await syncEngine.sync();
+
+      expect(result.created).toBe(2);
+      // Parent has children → index-file pattern
+      expect(mockReaderInstance.writeNote).toHaveBeenCalledWith(
+        'ToDo/Website/Website.md', 'Parent content',
+      );
+      // Child is a leaf → flat file inside parent folder
+      expect(mockReaderInstance.writeNote).toHaveBeenCalledWith(
+        'ToDo/Website/Design.md', 'Child content',
+      );
+    } finally {
+      process.env.HOME = originalHome;
+    }
+  });
 });

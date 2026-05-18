@@ -20,6 +20,11 @@ export class ObslineSettingTab extends PluginSettingTab {
 
     containerEl.createEl('h3', { text: 'Outline Connection' });
 
+    containerEl.createEl('p', {
+      text: 'The sync covers all collections and documents visible to the API token owner — including collections shared via group permissions.',
+      cls: 'setting-item-description',
+    });
+
     new Setting(containerEl)
       .setName('Outline server URL')
       .setDesc('The base URL of your Outline instance (e.g. https://notes.example.com)')

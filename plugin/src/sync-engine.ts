@@ -62,7 +62,6 @@ export class SyncEngine {
       const changedSinceLastSync = new Date(doc.updatedAt).getTime() > lastSyncTime;
 
       if (!isKnown || changedSinceLastSync) {
-        // Need full content: either new or changed
         try {
           const full = await this.client.getDocument(doc.id);
           fullDocs.push(full);
@@ -72,11 +71,16 @@ export class SyncEngine {
           result.errors.push(`Failed to load doc ${doc.id}: ${String(e)}`);
         }
       } else {
-        // Unchanged known doc — use stub (no text needed for Obsidian→Outline direction)
         const stub: OutlineDocument = { ...doc, text: '' };
         fullDocs.push(stub);
         docById.set(doc.id, stub);
       }
+    }
+
+    // Docs that are referenced as parentDocumentId by others → they have children
+    const parentDocIds = new Set<string>();
+    for (const doc of fullDocs) {
+      if (doc.parentDocumentId) parentDocIds.add(doc.parentDocumentId);
     }
 
     // Ensure collections exist for all vault folders + inbox for root-level notes
@@ -103,12 +107,24 @@ export class SyncEngine {
     // ── Obsidian → Outline ──────────────────────────────────────────────────
 
     if (!firstSync || dir === 'obsidian-to-outline' || dir === 'bidirectional') {
-      for (const note of vaultNotes) {
+      // Sort by depth so parent index-files are processed before their children
+      const sortedNotes = [...vaultNotes].sort((a, b) => {
+        const pa = a.path.split('/');
+        const pb = b.path.split('/');
+        if (pa.length !== pb.length) return pa.length - pb.length;
+        // At equal depth, index-files (filename == parent folder) come first
+        const isIndexA = pa[pa.length - 1].replace(/\.md$/, '') === pa[pa.length - 2];
+        const isIndexB = pb[pb.length - 1].replace(/\.md$/, '') === pb[pb.length - 2];
+        if (isIndexA && !isIndexB) return -1;
+        if (!isIndexA && isIndexB) return 1;
+        return 0;
+      });
+
+      for (const note of sortedNotes) {
         const knownId = state.pathToOutlineId[note.path];
         const outlineDoc = knownId ? docById.get(knownId) : undefined;
 
         if (!outlineDoc) {
-          // Rename detection via content hash (only works for fully-loaded docs)
           const noteHash = this.hash(note.content);
           const renamedFromId = hashToOutlineId.get(noteHash);
           const renamedFromPath = renamedFromId ? state.outlineIdMap[renamedFromId] : undefined;
@@ -125,13 +141,11 @@ export class SyncEngine {
               result.errors.push(`Rename failed: ${String(e)}`);
             }
           } else {
-            const { collectionId, parentDocumentId } = this.collectionFromPath(note.path, collectionIdByName);
+            const { collectionId, parentDocumentId } = this.collectionFromPath(note.path, collectionIdByName, state);
             if (!collectionId) {
-              // Should not happen after ensureCollections adds Inbox, but guard anyway
               result.errors.push(`No collection for "${note.path}" — skipping`);
               continue;
             }
-            // Adopt existing doc (same collection + title) instead of creating a duplicate
             const adoptKey = `${collectionId}::${note.title}`;
             const existing = outlineDocByKey.get(adoptKey);
             if (existing && !state.outlineIdMap[existing.id]) {
@@ -151,7 +165,6 @@ export class SyncEngine {
             }
           }
         } else {
-          // Known doc — only compare if we have full content (changed since last sync)
           if (outlineDoc.text !== '') {
             const noteHash = this.hash(note.content);
             const docHash = this.hash(outlineDoc.text);
@@ -182,13 +195,31 @@ export class SyncEngine {
 
     if (!firstSync || dir === 'outline-to-obsidian' || dir === 'bidirectional') {
       for (const doc of fullDocs) {
-        // Skip stubs (unchanged known docs) — already in sync
-        if (doc.text === '' && state.outlineIdMap[doc.id]) continue;
-
+        const notePath = this.buildPath(doc, collectionNameById, docById, parentDocIds);
         const mappedPath = state.outlineIdMap[doc.id];
+
+        // Handle path change: doc gained or lost children (flat ↔ index-file)
+        if (mappedPath && mappedPath !== notePath) {
+          onProgress?.(`Path changed: "${mappedPath}" → "${notePath}"`);
+          const existingFile = this.app.vault.getAbstractFileByPath(mappedPath);
+          if (existingFile instanceof TFile) {
+            const content = doc.text ||
+              await this.app.vault.read(existingFile);
+            await this.writeNote(notePath, content);
+            await this.app.vault.delete(existingFile);
+          }
+          state.outlineIdMap[doc.id] = notePath;
+          delete state.pathToOutlineId[mappedPath];
+          state.pathToOutlineId[notePath] = doc.id;
+          result.updated++;
+          continue;
+        }
+
         if (mappedPath && obsidianMap.has(mappedPath)) continue;
 
-        const notePath = this.buildPath(doc, collectionNameById, docById);
+        // Stubs that are already known — skip
+        if (doc.text === '' && mappedPath) continue;
+
         const existingIds = pathToOutlineIds.get(notePath) || [];
 
         if (existingIds.length > 0) {
@@ -233,7 +264,6 @@ export class SyncEngine {
       if (parts.length > 1) folders.add(parts[0]);
     }
 
-    // Inbox collection for root-level notes
     if (hasRootLevelNotes) {
       folders.add(this.settings.inboxCollection);
     }
@@ -303,10 +333,16 @@ export class SyncEngine {
     }
   }
 
+  /**
+   * Build the Obsidian file path for an Outline document.
+   * Docs that have children use the index-file pattern: Folder/Folder.md
+   * to avoid a file/folder conflict on the filesystem.
+   */
   private buildPath(
     doc: OutlineDocument,
     collectionNameById: Map<string, string>,
     docById: Map<string, OutlineDocument>,
+    parentDocIds: Set<string>,
   ): string {
     const parts: string[] = [];
     let parentId = doc.parentDocumentId;
@@ -318,22 +354,58 @@ export class SyncEngine {
     }
     const collectionName = collectionNameById.get(doc.collectionId) ?? 'Unsorted';
     parts.unshift(collectionName);
-    parts.push(`${doc.title}.md`);
+
+    if (parentDocIds.has(doc.id)) {
+      // This doc has children → index file inside its own folder
+      parts.push(doc.title);
+      parts.push(`${doc.title}.md`);
+    } else {
+      parts.push(`${doc.title}.md`);
+    }
+
     return parts.join('/');
   }
 
+  /**
+   * Resolve the Outline collection and parentDocumentId for an Obsidian path.
+   *
+   * Collection/Note.md              → { collectionId }
+   * Collection/Folder/Note.md       → { collectionId, parentDocumentId: Folder doc ID }
+   * Collection/Folder/Folder.md     → { collectionId }  (index file = Folder doc itself)
+   * Note.md (root)                  → { collectionId: Inbox }
+   */
   private collectionFromPath(
     notePath: string,
     collectionIdByName: Map<string, string>,
+    state: SyncState,
   ): { collectionId?: string; parentDocumentId?: string } {
     const parts = notePath.split('/').filter(Boolean);
-    // Root-level note → use Inbox collection
+
     if (parts.length < 2) {
-      const inboxId = collectionIdByName.get(this.settings.inboxCollection);
-      return { collectionId: inboxId };
+      return { collectionId: collectionIdByName.get(this.settings.inboxCollection) };
     }
+
     const collectionId = collectionIdByName.get(parts[0]);
-    return { collectionId };
+    if (!collectionId) return {};
+
+    if (parts.length === 2) {
+      return { collectionId };
+    }
+
+    // Deep path: Collection/[...folders/]Note.md
+    const filename = parts[parts.length - 1].replace(/\.md$/, '');
+    const parentFolderName = parts[parts.length - 2];
+
+    // Index file: Collection/Folder/Folder.md → this IS the Folder doc, no parent
+    if (filename === parentFolderName) {
+      return { collectionId };
+    }
+
+    // Look up parent doc via its index-file path in state
+    const parentIndexPath = [...parts.slice(0, -1), `${parentFolderName}.md`].join('/');
+    const parentDocId = state.pathToOutlineId[parentIndexPath];
+
+    return { collectionId, parentDocumentId: parentDocId };
   }
 
   private resolveConflict(note: VaultNote, doc: OutlineDocument): 'obsidian' | 'outline' {

@@ -102,6 +102,21 @@ export class ObsidianReader {
     if (await fs.pathExists(fullPath)) {
       await fs.remove(fullPath);
       logger.info(`Deleted note: ${relativePath}`);
+      await this.pruneEmptyFolders(relativePath);
+    }
+  }
+
+  private async pruneEmptyFolders(relativePath: string): Promise<void> {
+    const parts = relativePath.split('/');
+    for (let i = parts.length - 1; i > 0; i--) {
+      const folderPath = path.join(this.vaultPath, ...parts.slice(0, i));
+      const contents = await fs.readdir(folderPath).catch(() => null);
+      if (contents && contents.length === 0) {
+        await fs.rmdir(folderPath);
+        logger.info(`Removed empty folder: ${parts.slice(0, i).join('/')}`);
+      } else {
+        break;
+      }
     }
   }
 

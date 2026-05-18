@@ -181,12 +181,15 @@ var SyncEngine = class {
       outlineDocByKey.set(`${doc.collectionId}::${doc.title}`, doc);
     }
     const obsidianMap = new Map(vaultNotes.map((n) => [n.path, n]));
+    const outlineIdSet = new Set(outlineDocsList.map((d) => d.id));
     const pathToOutlineIds = /* @__PURE__ */ new Map();
     for (const [oid, opath] of Object.entries(state.outlineIdMap)) {
       if (!pathToOutlineIds.has(opath))
         pathToOutlineIds.set(opath, []);
       pathToOutlineIds.get(opath).push(oid);
     }
+    const knownPaths = Object.keys(state.pathToOutlineId);
+    const knownIds = Object.keys(state.outlineIdMap);
     const firstSync = !state.firstSyncDone;
     const dir = this.settings.initialSyncDirection;
     if (!firstSync || dir === "obsidian-to-outline" || dir === "bidirectional") {
@@ -287,6 +290,38 @@ var SyncEngine = class {
           state.pathToOutlineId[notePath] = doc.id;
           pathToOutlineIds.set(notePath, [doc.id]);
         }
+      }
+    }
+    for (const obsPath of knownPaths) {
+      const outlineId = state.pathToOutlineId[obsPath];
+      if (outlineId && !obsidianMap.has(obsPath)) {
+        onProgress == null ? void 0 : onProgress(`Obsidian deleted "${obsPath}" \u2014 removing from Outline`);
+        try {
+          await this.client.deleteDocument(outlineId);
+        } catch (e) {
+          result.errors.push(`Delete Outline doc failed for "${obsPath}": ${String(e)}`);
+        }
+        delete state.outlineIdMap[outlineId];
+        delete state.pathToOutlineId[obsPath];
+        delete state.fileHashes[obsPath];
+        result.deleted++;
+      }
+    }
+    for (const outlineId of knownIds) {
+      const obsPath = state.outlineIdMap[outlineId];
+      if (obsPath && !outlineIdSet.has(outlineId)) {
+        onProgress == null ? void 0 : onProgress(`Outline deleted doc \u2014 removing Obsidian file "${obsPath}"`);
+        try {
+          const file = this.app.vault.getAbstractFileByPath(obsPath);
+          if (file instanceof import_obsidian2.TFile)
+            await this.app.vault.delete(file);
+        } catch (e) {
+          result.errors.push(`Delete Obsidian file failed for "${obsPath}": ${String(e)}`);
+        }
+        delete state.outlineIdMap[outlineId];
+        delete state.pathToOutlineId[obsPath];
+        delete state.fileHashes[obsPath];
+        result.deleted++;
       }
     }
     state.lastSyncTime = Date.now();

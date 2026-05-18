@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Obsline v0.2.0** — Bi-directional sync between Obsidian and a self-hosted Outline instance.
+**Obsline v0.3.0** — Bi-directional sync between Obsidian and a self-hosted Outline instance.
 
 Two distinct deliverables in one repo:
 1. **CLI tool** (`src/`) — Node.js + Commander.js, runs on any machine
@@ -12,7 +12,7 @@ Two distinct deliverables in one repo:
 
 **Key design constraints:**
 - Local `.md` files are the source of truth for RAG/ML pipelines
-- No deletion propagation from Outline → Obsidian (only Obsidian deletes propagate to Outline)
+- Deletions propagate in both directions (Obsidian ↔ Outline)
 - All Outline API endpoints use **POST** (not GET)
 - Documents must be created with `publish: true` or they land in Drafts
 
@@ -38,9 +38,52 @@ cd plugin && ./install.sh /path/to/obsidian/vault
 # Package + release ZIP
 cd plugin && npm run release    # → releases/obsline-vX.Y.Z.zip
 
-# Git — two remotes
-git push public main            # öffentliches Repo (kein .claude/, kein CLAUDE.md)
-git push private main           # privates Repo (alles)
+# Git — Branch-Strategie
+# main    = öffentlich (kein CLAUDE.md, keine Claude-Hinweise in Commits)
+# private = alles inkl. CLAUDE.md
+
+git push public main            # public repo aktualisieren
+git push private private:main   # private repo aktualisieren
+```
+
+## Git-Workflow
+
+Neues Feature entwickeln:
+```bash
+# 1. Auf main arbeiten (öffentlich-sicher)
+git add <files>
+git commit -m "feat: ..."      # KEIN Co-Authored-By, kein Verweis auf Claude
+
+# 2. public repo pushen
+git push public main
+
+# 3. private branch aktuell halten
+git checkout private
+git merge main
+git push private private:main
+git checkout main
+```
+
+CLAUDE.md oder .claude/ ändern:
+```bash
+git checkout private
+# ... Änderungen vornehmen ...
+git add -f CLAUDE.md
+git commit -m "chore: update CLAUDE.md"
+git push private private:main
+git checkout main
+# NICHT zu public pushen
+```
+
+Release erstellen:
+```bash
+# 1. Version in allen Dateien erhöhen (src/version.ts, package.json, plugin/manifest.json, plugin/package.json, README.md)
+cd plugin && npm run release    # Build + ZIP erstellen
+git add src/version.ts package.json plugin/manifest.json plugin/package.json plugin/main.js README.md
+git commit -m "chore: bump version to vX.Y.Z"
+git push public main
+git checkout private && git merge main && git push private private:main && git checkout main
+gh release create vX.Y.Z releases/obsline-vX.Y.Z.zip --repo webmeleon/Obsline --title "vX.Y.Z" --notes "..."
 ```
 
 ## Architecture
@@ -49,7 +92,7 @@ git push private main           # privates Repo (alles)
 
 | File | Role |
 |------|------|
-| `src/version.ts` | Single source of version string (`VERSION = '0.2.0'`) |
+| `src/version.ts` | Single source of version string (`VERSION = '0.3.0'`) |
 | `src/index.ts` | Commander.js CLI — commands: `sync`, `config`, `status` |
 | `src/core/obsidian.ts` | Vault reader/writer using `fs-extra`; uses `minimatch` (v9 named import) |
 | `src/core/outline.ts` | Outline REST client using `axios`; all calls are POST |

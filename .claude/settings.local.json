@@ -14,7 +14,11 @@
       "Bash(git commit -m 'Implement Outline Collections → Obsidian folder structure *)",
       "Bash(git commit -m 'Fix duplicate document creation in sync *)",
       "Bash(git commit -m 'Fix collection assignment for new documents *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(git commit *)",
+      "Bash(mkdir -p \"/Users/marvin/Documents/Obsidian/Marvin/.obsidian/plugins/obsline\")",
+      "Bash(cp /Users/marvin/Repos/Obsline/plugin/main.js /Users/marvin/Repos/Obsline/plugin/manifest.json /Users/marvin/Repos/Obsline/plugin/styles.css \"/Users/marvin/Documents/Obsidian/Marvin/.obsidian/plugins/obsline/\")",
+      "Bash(npx ts-node *)"
     ]
   }
 }

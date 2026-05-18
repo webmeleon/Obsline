@@ -128,8 +128,9 @@ export class SyncEngine {
     // Load full document content
     const fullOutlineDocs: OutlineDocument[] = [];
     const docById = new Map<string, OutlineDocument>();
-    // hash → outlineId (for rename detection)
     const hashToOutlineId = new Map<string, string>();
+    // (collectionId + title) → doc — adopt existing docs instead of creating duplicates
+    const outlineDocByKey = new Map<string, OutlineDocument>();
 
     for (const doc of outlineDocuments) {
       try {
@@ -139,6 +140,7 @@ export class SyncEngine {
         if (fullDoc.text) {
           hashToOutlineId.set(this.hashContent(fullDoc.text), fullDoc.id);
         }
+        outlineDocByKey.set(`${fullDoc.collectionId}::${fullDoc.title}`, fullDoc);
       } catch (error) {
         this.logger.warn(`Failed to load document ${doc.id}: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -168,16 +170,24 @@ export class SyncEngine {
           delete this.syncState.pathToOutlineId[renamedFromPath];
           result.renamed++;
         } else {
-          // Truly new document
+          // Adopt existing Outline doc (same collection + title) instead of creating a duplicate
           const { collectionId, parentDocumentId } = this.extractCollectionAndParentFromPath(
             note.path, collectionIdByName
           );
-          const created = await this.outlineClient.createDocument(
-            note.title, note.content, collectionId, parentDocumentId
-          );
-          this.syncState.outlineIdMap[created.id] = note.path;
-          this.syncState.pathToOutlineId[note.path] = created.id;
-          result.created++;
+          const adoptKey = collectionId ? `${collectionId}::${note.title}` : `::${note.title}`;
+          const existing = outlineDocByKey.get(adoptKey);
+          if (existing && !this.syncState.outlineIdMap[existing.id]) {
+            this.logger.info(`Adopting existing Outline doc for "${note.path}"`);
+            this.syncState.outlineIdMap[existing.id] = note.path;
+            this.syncState.pathToOutlineId[note.path] = existing.id;
+          } else {
+            const created = await this.outlineClient.createDocument(
+              note.title, note.content, collectionId, parentDocumentId
+            );
+            this.syncState.outlineIdMap[created.id] = note.path;
+            this.syncState.pathToOutlineId[note.path] = created.id;
+            result.created++;
+          }
         }
       } else {
         // Known document — check for content or title changes

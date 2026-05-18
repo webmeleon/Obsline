@@ -166,6 +166,10 @@ var SyncEngine = class {
     const updatedCollections = await this.ensureCollections(vaultNotes, collections, onProgress);
     const collectionNameById = new Map(updatedCollections.map((c) => [c.id, c.name]));
     const collectionIdByName = new Map(updatedCollections.map((c) => [c.name, c.id]));
+    const outlineDocByKey = /* @__PURE__ */ new Map();
+    for (const doc of fullDocs) {
+      outlineDocByKey.set(`${doc.collectionId}::${doc.title}`, doc);
+    }
     const obsidianMap = new Map(vaultNotes.map((n) => [n.path, n]));
     const pathToOutlineIds = /* @__PURE__ */ new Map();
     for (const [oid, opath] of Object.entries(state.outlineIdMap)) {
@@ -196,14 +200,22 @@ var SyncEngine = class {
             }
           } else {
             const { collectionId, parentDocumentId } = this.collectionFromPath(note.path, collectionIdByName);
-            onProgress == null ? void 0 : onProgress(`Creating in Outline: ${note.path}`);
-            try {
-              const created = await this.client.createDocument(note.title, note.content, collectionId, parentDocumentId);
-              state.outlineIdMap[created.id] = note.path;
-              state.pathToOutlineId[note.path] = created.id;
-              result.created++;
-            } catch (e) {
-              result.errors.push(`Create failed for ${note.path}: ${String(e)}`);
+            const adoptKey = collectionId ? `${collectionId}::${note.title}` : `::${note.title}`;
+            const existing = outlineDocByKey.get(adoptKey);
+            if (existing && !state.outlineIdMap[existing.id]) {
+              onProgress == null ? void 0 : onProgress(`Adopting existing Outline doc: ${note.path}`);
+              state.outlineIdMap[existing.id] = note.path;
+              state.pathToOutlineId[note.path] = existing.id;
+            } else {
+              onProgress == null ? void 0 : onProgress(`Creating in Outline: ${note.path}`);
+              try {
+                const created = await this.client.createDocument(note.title, note.content, collectionId, parentDocumentId);
+                state.outlineIdMap[created.id] = note.path;
+                state.pathToOutlineId[note.path] = created.id;
+                result.created++;
+              } catch (e) {
+                result.errors.push(`Create failed for ${note.path}: ${String(e)}`);
+              }
             }
           }
         } else {

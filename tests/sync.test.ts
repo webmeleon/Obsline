@@ -271,7 +271,7 @@ describe('SyncEngine', () => {
     }
   });
 
-  test('should set parentDocumentId for nested Obsidian notes', async () => {
+  test('should set parentDocumentId for nested Obsidian notes (coexistence pattern)', async () => {
     const mockReaderInstance = mockObsidianReader.mock.results[0].value;
     const mockClientInstance = mockOutlineClient.mock.results[0].value;
 
@@ -279,9 +279,9 @@ describe('SyncEngine', () => {
     process.env.HOME = tempVault;
 
     try {
-      // Index file (parent doc) is created first due to depth sorting
+      // With coexistence: parent is flat (ToDo/Website.md), child in subfolder (ToDo/Website/Design.md)
       const parentNote = {
-        path: 'ToDo/Website/Website.md',
+        path: 'ToDo/Website.md',
         title: 'Website',
         content: 'Website overview',
         lastModified: Date.now(),
@@ -293,7 +293,8 @@ describe('SyncEngine', () => {
         lastModified: Date.now(),
       };
 
-      mockReaderInstance.readVault.mockResolvedValue([childNote, parentNote]); // unsorted order
+      // Depth sort ensures parent (depth 2) is processed before child (depth 3)
+      mockReaderInstance.readVault.mockResolvedValue([childNote, parentNote]);
 
       const parentDocId = 'doc-website';
       mockClientInstance.createDocument
@@ -319,11 +320,11 @@ describe('SyncEngine', () => {
       const result = await syncEngine.sync();
 
       expect(result.created).toBe(2);
-      // Parent (index-file) must be created first, without parentDocumentId
+      // Parent (flat file) must be created first, without parentDocumentId
       expect(mockClientInstance.createDocument).toHaveBeenNthCalledWith(
         1, 'Website', 'Website overview', 'col-1', undefined,
       );
-      // Child must reference parent
+      // Child must reference parent via state lookup of ToDo/Website.md
       expect(mockClientInstance.createDocument).toHaveBeenNthCalledWith(
         2, 'Design', 'Design content', 'col-1', parentDocId,
       );
@@ -332,7 +333,7 @@ describe('SyncEngine', () => {
     }
   });
 
-  test('should build index-file path for Outline docs that have children', async () => {
+  test('should use coexistence pattern for Outline docs: parent flat, children in subfolder', async () => {
     const mockReaderInstance = mockObsidianReader.mock.results[0].value;
     const mockClientInstance = mockOutlineClient.mock.results[0].value;
 
@@ -371,11 +372,11 @@ describe('SyncEngine', () => {
       const result = await syncEngine.sync();
 
       expect(result.created).toBe(2);
-      // Parent has children → index-file pattern
+      // Parent stays flat — no index-file duplication
       expect(mockReaderInstance.writeNote).toHaveBeenCalledWith(
-        'ToDo/Website/Website.md', 'Parent content',
+        'ToDo/Website.md', 'Parent content',
       );
-      // Child is a leaf → flat file inside parent folder
+      // Child goes into subfolder named after parent
       expect(mockReaderInstance.writeNote).toHaveBeenCalledWith(
         'ToDo/Website/Design.md', 'Child content',
       );

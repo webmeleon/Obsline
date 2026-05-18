@@ -145,26 +145,12 @@ export class SyncEngine {
       }
     }
 
-    // Docs that are referenced as parentDocumentId by others → they have children
-    const parentDocIds = new Set<string>();
-    for (const doc of fullOutlineDocs) {
-      if (doc.parentDocumentId) parentDocIds.add(doc.parentDocumentId);
-    }
-
     // ── Obsidian → Outline ──────────────────────────────────────────────────
-    // Sort by path depth so parent index-files are processed before their children
+    // Sort by path depth so parent flat-files are processed before their children
     const obsidianMap = new Map(obsidianNotes.map(n => [n.path, n]));
-    const sortedNotes = [...obsidianNotes].sort((a, b) => {
-      const pa = a.path.split('/');
-      const pb = b.path.split('/');
-      if (pa.length !== pb.length) return pa.length - pb.length;
-      // At equal depth, index-files (filename == parent folder) come first
-      const isIndexA = pa[pa.length - 1].replace(/\.md$/, '') === pa[pa.length - 2];
-      const isIndexB = pb[pb.length - 1].replace(/\.md$/, '') === pb[pb.length - 2];
-      if (isIndexA && !isIndexB) return -1;
-      if (!isIndexA && isIndexB) return 1;
-      return 0;
-    });
+    const sortedNotes = [...obsidianNotes].sort(
+      (a, b) => a.path.split('/').length - b.path.split('/').length
+    );
 
     for (const note of sortedNotes) {
       const knownOutlineId = this.syncState.pathToOutlineId[note.path];
@@ -229,24 +215,8 @@ export class SyncEngine {
     // ── Outline → Obsidian ──────────────────────────────────────────────────
 
     for (const outlineDoc of fullOutlineDocs) {
-      const notePath = this.buildObsidianPath(outlineDoc, collectionNameById, docById, parentDocIds);
+      const notePath = this.buildObsidianPath(outlineDoc, collectionNameById, docById);
       const mappedPath = this.syncState.outlineIdMap[outlineDoc.id];
-
-      // Handle path change: doc gained or lost children (flat ↔ index-file)
-      if (mappedPath && mappedPath !== notePath) {
-        this.logger.info(`Path changed: "${mappedPath}" → "${notePath}"`);
-        if (await this.obsidianReader.noteExists(mappedPath)) {
-          const content = outlineDoc.text ||
-            await fs.readFile(path.join(this.config.obsidianVault, mappedPath), 'utf-8');
-          await this.obsidianReader.writeNote(notePath, content);
-          await this.obsidianReader.deleteNote(mappedPath);
-        }
-        this.syncState.outlineIdMap[outlineDoc.id] = notePath;
-        delete this.syncState.pathToOutlineId[mappedPath];
-        this.syncState.pathToOutlineId[notePath] = outlineDoc.id;
-        result.updated++;
-        continue;
-      }
 
       if (mappedPath && obsidianMap.has(mappedPath)) continue;
 
@@ -275,14 +245,14 @@ export class SyncEngine {
 
   /**
    * Build the Obsidian file path for an Outline document.
-   * Docs that have children use the index-file pattern: Folder/Folder.md
-   * to avoid a file/folder conflict on the filesystem.
+   * Coexistence pattern: parent notes stay flat, children go into a same-named subfolder.
+   * e.g. "Website" (parent) → Collection/Website.md
+   *      "Design" (child of Website) → Collection/Website/Design.md
    */
   private buildObsidianPath(
     doc: OutlineDocument,
     collectionNameById: Map<string, string>,
-    docById: Map<string, OutlineDocument>,
-    parentDocIds: Set<string>
+    docById: Map<string, OutlineDocument>
   ): string {
     const parts: string[] = [];
 
@@ -296,24 +266,18 @@ export class SyncEngine {
 
     const collectionName = collectionNameById.get(doc.collectionId) ?? 'Unsorted';
     parts.unshift(collectionName);
-
-    if (parentDocIds.has(doc.id)) {
-      // This doc has children → index file inside its own folder
-      parts.push(doc.title);
-      parts.push(`${doc.title}.md`);
-    } else {
-      parts.push(`${doc.title}.md`);
-    }
+    parts.push(`${doc.title}.md`);
 
     return parts.join('/');
   }
 
   /**
    * Resolve the Outline collection and parentDocumentId for an Obsidian path.
+   * Coexistence pattern: the parent doc lives one level up as a flat file.
    *
    * Collection/Note.md              → { collectionId }
    * Collection/Folder/Note.md       → { collectionId, parentDocumentId: Folder doc ID }
-   * Collection/Folder/Folder.md     → { collectionId }  (index file = Folder doc itself)
+   *   parent lookup: Collection/Folder.md in state
    * Note.md (root)                  → { collectionId: Inbox }
    */
   private extractCollectionAndParentFromPath(
@@ -336,20 +300,13 @@ export class SyncEngine {
       return { collectionId };
     }
 
-    // Deep path: Collection/[...folders/]Note.md
-    const filename = parts[parts.length - 1].replace(/\.md$/, '');
+    // Deep path: Collection/Folder/Note.md
+    // Parent is the flat file one level above: Collection/Folder.md
     const parentFolderName = parts[parts.length - 2];
-
-    // Index file: Collection/Folder/Folder.md → this IS the Folder doc, no parent
-    if (filename === parentFolderName) {
-      return { collectionId };
-    }
-
-    // Look up parent doc via its index-file path in state
-    const parentIndexPath = [...parts.slice(0, -1), `${parentFolderName}.md`].join('/');
-    const parentDocId = this.syncState.pathToOutlineId[parentIndexPath];
+    const parentPath = [...parts.slice(0, -2), `${parentFolderName}.md`].join('/');
+    const parentDocId = this.syncState.pathToOutlineId[parentPath];
     if (!parentDocId) {
-      this.logger.warn(`Parent doc for "${notePath}" not in state (${parentIndexPath})`);
+      this.logger.warn(`Parent doc for "${notePath}" not in state (${parentPath})`);
     }
 
     return { collectionId, parentDocumentId: parentDocId };

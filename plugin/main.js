@@ -173,11 +173,6 @@ var SyncEngine = class {
         docById.set(doc.id, stub);
       }
     }
-    const parentDocIds = /* @__PURE__ */ new Set();
-    for (const doc of fullDocs) {
-      if (doc.parentDocumentId)
-        parentDocIds.add(doc.parentDocumentId);
-    }
     const updatedCollections = await this.ensureCollections(vaultNotes, collections, onProgress);
     const collectionNameById = new Map(updatedCollections.map((c) => [c.id, c.name]));
     const collectionIdByName = new Map(updatedCollections.map((c) => [c.name, c.id]));
@@ -195,19 +190,9 @@ var SyncEngine = class {
     const firstSync = !state.firstSyncDone;
     const dir = this.settings.initialSyncDirection;
     if (!firstSync || dir === "obsidian-to-outline" || dir === "bidirectional") {
-      const sortedNotes = [...vaultNotes].sort((a, b) => {
-        const pa = a.path.split("/");
-        const pb = b.path.split("/");
-        if (pa.length !== pb.length)
-          return pa.length - pb.length;
-        const isIndexA = pa[pa.length - 1].replace(/\.md$/, "") === pa[pa.length - 2];
-        const isIndexB = pb[pb.length - 1].replace(/\.md$/, "") === pb[pb.length - 2];
-        if (isIndexA && !isIndexB)
-          return -1;
-        if (!isIndexA && isIndexB)
-          return 1;
-        return 0;
-      });
+      const sortedNotes = [...vaultNotes].sort(
+        (a, b) => a.path.split("/").length - b.path.split("/").length
+      );
       for (const note of sortedNotes) {
         const knownId = state.pathToOutlineId[note.path];
         const outlineDoc = knownId ? docById.get(knownId) : void 0;
@@ -276,22 +261,8 @@ var SyncEngine = class {
     }
     if (!firstSync || dir === "outline-to-obsidian" || dir === "bidirectional") {
       for (const doc of fullDocs) {
-        const notePath = this.buildPath(doc, collectionNameById, docById, parentDocIds);
+        const notePath = this.buildPath(doc, collectionNameById, docById);
         const mappedPath = state.outlineIdMap[doc.id];
-        if (mappedPath && mappedPath !== notePath) {
-          onProgress == null ? void 0 : onProgress(`Path changed: "${mappedPath}" \u2192 "${notePath}"`);
-          const existingFile = this.app.vault.getAbstractFileByPath(mappedPath);
-          if (existingFile instanceof import_obsidian2.TFile) {
-            const content = doc.text || await this.app.vault.read(existingFile);
-            await this.writeNote(notePath, content);
-            await this.app.vault.delete(existingFile);
-          }
-          state.outlineIdMap[doc.id] = notePath;
-          delete state.pathToOutlineId[mappedPath];
-          state.pathToOutlineId[notePath] = doc.id;
-          result.updated++;
-          continue;
-        }
         if (mappedPath && obsidianMap.has(mappedPath))
           continue;
         if (doc.text === "" && mappedPath)
@@ -394,10 +365,11 @@ var SyncEngine = class {
   }
   /**
    * Build the Obsidian file path for an Outline document.
-   * Docs that have children use the index-file pattern: Folder/Folder.md
-   * to avoid a file/folder conflict on the filesystem.
+   * Coexistence pattern: parent notes stay flat, children go into a same-named subfolder.
+   * e.g. "Website" (parent) → Collection/Website.md
+   *      "Design" (child of Website) → Collection/Website/Design.md
    */
-  buildPath(doc, collectionNameById, docById, parentDocIds) {
+  buildPath(doc, collectionNameById, docById) {
     var _a;
     const parts = [];
     let parentId = doc.parentDocumentId;
@@ -410,20 +382,16 @@ var SyncEngine = class {
     }
     const collectionName = (_a = collectionNameById.get(doc.collectionId)) != null ? _a : "Unsorted";
     parts.unshift(collectionName);
-    if (parentDocIds.has(doc.id)) {
-      parts.push(doc.title);
-      parts.push(`${doc.title}.md`);
-    } else {
-      parts.push(`${doc.title}.md`);
-    }
+    parts.push(`${doc.title}.md`);
     return parts.join("/");
   }
   /**
    * Resolve the Outline collection and parentDocumentId for an Obsidian path.
+   * Coexistence pattern: the parent doc lives one level up as a flat file.
    *
    * Collection/Note.md              → { collectionId }
    * Collection/Folder/Note.md       → { collectionId, parentDocumentId: Folder doc ID }
-   * Collection/Folder/Folder.md     → { collectionId }  (index file = Folder doc itself)
+   *   parent lookup: Collection/Folder.md in state
    * Note.md (root)                  → { collectionId: Inbox }
    */
   collectionFromPath(notePath, collectionIdByName, state) {
@@ -437,13 +405,9 @@ var SyncEngine = class {
     if (parts.length === 2) {
       return { collectionId };
     }
-    const filename = parts[parts.length - 1].replace(/\.md$/, "");
     const parentFolderName = parts[parts.length - 2];
-    if (filename === parentFolderName) {
-      return { collectionId };
-    }
-    const parentIndexPath = [...parts.slice(0, -1), `${parentFolderName}.md`].join("/");
-    const parentDocId = state.pathToOutlineId[parentIndexPath];
+    const parentPath = [...parts.slice(0, -2), `${parentFolderName}.md`].join("/");
+    const parentDocId = state.pathToOutlineId[parentPath];
     return { collectionId, parentDocumentId: parentDocId };
   }
   resolveConflict(note, doc) {

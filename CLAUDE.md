@@ -111,7 +111,7 @@ try { /* test */ } finally { process.env.HOME = originalHome; }
 ```json
 {
   "obsidianVault": "/Users/marvin/Documents/Obsidian/Marvin",
-  "outlineUrl": "https://notes.hydrahub.de",
+  "outlineUrl": "https://notes.example.com",
   "outlineApiToken": "ol_api_...",
   "syncInterval": 300,
   "conflictResolution": "last-write-wins",

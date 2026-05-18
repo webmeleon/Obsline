@@ -228,10 +228,8 @@ export class SyncEngine {
       const notePath = this.buildObsidianPath(outlineDoc, collectionNameById, docById);
       const mappedPath = this.syncState.outlineIdMap[outlineDoc.id];
 
-      if (mappedPath && obsidianMap.has(mappedPath)) continue;
-
-      // Stubs that are already known — skip
-      if (outlineDoc.text === '' && mappedPath) continue;
+      // Known doc: updates handled in Obsidian→Outline pass; deletions in deletion pass.
+      if (mappedPath) continue;
 
       const existingIds = pathToOutlineIds.get(notePath) || [];
       if (existingIds.length > 0) {

@@ -3066,12 +3066,16 @@ var SyncEngine = class {
         }
       }
     }
-    for (const obsPath of knownPaths) {
+    const pathsToDelete = knownPaths.filter((obsPath) => {
       const outlineId = state.pathToOutlineId[obsPath];
       if (!outlineId || obsidianMap.has(obsPath))
-        continue;
+        return false;
       const folderPrefix = obsPath.replace(/\.md$/, "/");
-      if ([...obsidianMap.keys()].some((p) => p.startsWith(folderPrefix)))
+      return ![...obsidianMap.keys()].some((p) => p.startsWith(folderPrefix));
+    }).sort((a, b) => b.split("/").length - a.split("/").length);
+    for (const obsPath of pathsToDelete) {
+      const outlineId = state.pathToOutlineId[obsPath];
+      if (!outlineId)
         continue;
       onProgress == null ? void 0 : onProgress(`Obsidian deleted "${obsPath}" \u2014 removing from Outline`);
       try {

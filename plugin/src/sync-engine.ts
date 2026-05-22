@@ -274,15 +274,20 @@ export class SyncEngine {
     // ── Deletions: Obsidian → Outline ──────────────────────────────────────
     // Uses snapshot keys; rename detection above may have cleared a path from state,
     // so we re-check state[obsPath] before acting.
-    for (const obsPath of knownPaths) {
+    // Sort deepest paths first so children are deleted before parents (Outline 403s on parent with children).
+    const pathsToDelete = knownPaths
+      .filter(obsPath => {
+        const outlineId = state.pathToOutlineId[obsPath];
+        if (!outlineId || obsidianMap.has(obsPath)) return false;
+        // Skip virtual parent docs whose folder still has children in vault
+        const folderPrefix = obsPath.replace(/\.md$/, '/');
+        return ![...obsidianMap.keys()].some(p => p.startsWith(folderPrefix));
+      })
+      .sort((a, b) => b.split('/').length - a.split('/').length); // deepest first
+
+    for (const obsPath of pathsToDelete) {
       const outlineId = state.pathToOutlineId[obsPath];
-      if (!outlineId || obsidianMap.has(obsPath)) continue;
-
-      // Skip virtual parent docs — their .md file never exists in Obsidian
-      // but their folder does (has child notes). Deleting them would destroy children.
-      const folderPrefix = obsPath.replace(/\.md$/, '/');
-      if ([...obsidianMap.keys()].some(p => p.startsWith(folderPrefix))) continue;
-
+      if (!outlineId) continue; // may have been cleared by an earlier iteration
       onProgress?.(`Obsidian deleted "${obsPath}" — removing from Outline`);
       try {
         await this.client.deleteDocument(outlineId);

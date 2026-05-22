@@ -103,24 +103,30 @@ When a new release is available, Obsline shows a notification on startup with an
 
 Found in Settings → Obsline → **Danger zone**:
 
-- **Sync State zurücksetzen** — clears local tracking only (Outline data untouched). Use this when setting up a new machine and you want Obsidian to pull existing Outline content.
-- **Alles in Outline löschen** — deletes ALL collections and documents from Outline, then resets local state. Use before a clean first sync from Obsidian. Both actions require a double-click confirmation.
+- **Reset sync state** — clears local tracking only (Outline data untouched). Use this when setting up a new machine and you want Obsidian to pull existing Outline content.
+- **Delete everything in Outline** — deletes ALL collections and documents from Outline, then resets local state. Use before a clean first sync from Obsidian. Both actions require a double-click confirmation.
 
 ---
 
 ## CLI Tool
 
+The CLI is for environments where Obsidian isn't running — a server, a headless machine, a cron job, or a RAG/ML pipeline that needs files kept in sync without a desktop app. If you have Obsidian open most of the time, use the plugin instead.
+
 ```bash
+git clone https://github.com/webmeleon/Obsline.git
+cd Obsline
 npm install
 
-# Configure
-npm run dev config       # creates ~/.obsline/config.json
+# Configure (creates ~/.obsline/config.json)
+npm run dev config
 
-# Sync
-npm run dev sync         # one-off sync
-npm run dev sync --daemon  # polling daemon (default: every 5 min)
+# One-off sync
+npm run dev sync
 
-# Status
+# Polling daemon — syncs every N seconds (default: 300)
+npm run dev sync --daemon
+
+# Show sync status
 npm run dev status
 ```
 

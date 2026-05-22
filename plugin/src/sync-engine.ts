@@ -106,6 +106,9 @@ export class SyncEngine {
     // ── Obsidian → Outline ──────────────────────────────────────────────────
 
     if (!firstSync || dir === 'obsidian-to-outline' || dir === 'bidirectional') {
+      // Ensure virtual parent docs exist for pure-folder hierarchies before main loop
+      await this.ensureParentDocsForFolders(vaultNotes, collectionIdByName, outlineDocByKey, state);
+
       // Sort by depth so parent flat-files are processed before their children
       const sortedNotes = [...vaultNotes].sort(
         (a, b) => a.path.split('/').length - b.path.split('/').length,
@@ -160,8 +163,10 @@ export class SyncEngine {
             }
           }
         } else {
+          const noteHash = this.hash(note.content);
+          let contentUpdated = false;
+
           if (outlineDoc.text !== '') {
-            const noteHash = this.hash(note.content);
             const docHash = this.hash(outlineDoc.text);
             const titleChanged = note.title !== outlineDoc.title;
 
@@ -175,9 +180,36 @@ export class SyncEngine {
                   await this.writeNote(note.path, outlineDoc.text);
                 }
                 result.updated++;
+                contentUpdated = true;
               } catch (e) {
                 result.errors.push(`Update failed for ${note.path}: ${String(e)}`);
               }
+            }
+          } else {
+            // Stub: Outline unchanged — push Obsidian changes if any
+            const lastKnownHash = state.fileHashes[note.path];
+            if (lastKnownHash && noteHash !== lastKnownHash) {
+              try {
+                await this.client.updateDocument(outlineDoc.id, note.content, note.title);
+                result.updated++;
+                contentUpdated = true;
+              } catch (e) {
+                result.errors.push(`Update failed for ${note.path}: ${String(e)}`);
+              }
+            }
+          }
+
+          // Move document if parent has changed (fixes flat docs from first sync)
+          const { collectionId: expectedCollection, parentDocumentId: expectedParent } =
+            this.collectionFromPath(note.path, collectionIdByName, state);
+          const currentParent = outlineDoc.parentDocumentId ?? undefined;
+          if (expectedCollection && expectedParent !== currentParent) {
+            onProgress?.(`Moving to correct parent: ${note.path}`);
+            try {
+              await this.client.moveDocument(outlineDoc.id, expectedCollection, expectedParent);
+              if (!contentUpdated) result.updated++;
+            } catch (e) {
+              result.errors.push(`Move failed for ${note.path}: ${String(e)}`);
             }
           }
         }
@@ -264,6 +296,57 @@ export class SyncEngine {
     state.firstSyncDone = true;
 
     return result;
+  }
+
+  private async ensureParentDocsForFolders(
+    notes: VaultNote[],
+    collectionIdByName: Map<string, string>,
+    outlineDocByKey: Map<string, OutlineDocument>,
+    state: SyncState,
+  ): Promise<void> {
+    const notePaths = new Set(notes.map(n => n.path));
+    const folderPaths = new Set<string>();
+
+    for (const note of notes) {
+      const parts = note.path.split('/');
+      for (let i = 2; i < parts.length; i++) {
+        folderPaths.add(parts.slice(0, i).join('/'));
+      }
+    }
+
+    const sorted = [...folderPaths].sort(
+      (a, b) => a.split('/').length - b.split('/').length,
+    );
+
+    for (const folderPath of sorted) {
+      const flatFilePath = `${folderPath}.md`;
+      if (notePaths.has(flatFilePath)) continue;
+      if (state.pathToOutlineId[flatFilePath]) continue;
+
+      const { collectionId, parentDocumentId } = this.collectionFromPath(
+        flatFilePath, collectionIdByName, state,
+      );
+      if (!collectionId) continue;
+
+      const folderTitle = folderPath.split('/').pop()!;
+      const adoptKey = `${collectionId}::${folderTitle}`;
+      const existing = outlineDocByKey.get(adoptKey);
+
+      if (existing && !state.outlineIdMap[existing.id]) {
+        state.outlineIdMap[existing.id] = flatFilePath;
+        state.pathToOutlineId[flatFilePath] = existing.id;
+      } else if (!existing) {
+        try {
+          const created = await this.client.createDocument(
+            folderTitle, '', collectionId, parentDocumentId,
+          );
+          state.outlineIdMap[created.id] = flatFilePath;
+          state.pathToOutlineId[flatFilePath] = created.id;
+        } catch (e) {
+          // non-fatal: children will land flat but won't break the sync
+        }
+      }
+    }
   }
 
   private async ensureCollections(

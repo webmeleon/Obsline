@@ -2829,6 +2829,12 @@ var OutlineClient = class {
     const res = await this.post("/documents.update", body);
     return { ...res.data, published: true };
   }
+  async moveDocument(id, collectionId, parentDocumentId) {
+    const body = { id, collectionId };
+    if (parentDocumentId)
+      body.parentDocumentId = parentDocumentId;
+    await this.post("/documents.move", body);
+  }
   async deleteDocument(id) {
     await this.post("/documents.delete", { id });
   }
@@ -2849,6 +2855,7 @@ var SyncEngine = class {
     return this.client.testConnection();
   }
   async sync(onProgress) {
+    var _a;
     const result = { created: 0, updated: 0, deleted: 0, renamed: 0, conflicts: [], errors: [] };
     const state = this.settings.syncState;
     const lastSyncTime = state.lastSyncTime;
@@ -2902,6 +2909,7 @@ var SyncEngine = class {
     const firstSync = !state.firstSyncDone;
     const dir = this.settings.initialSyncDirection;
     if (!firstSync || dir === "obsidian-to-outline" || dir === "bidirectional") {
+      await this.ensureParentDocsForFolders(vaultNotes, collectionIdByName, outlineDocByKey, state);
       const sortedNotes = [...vaultNotes].sort(
         (a, b) => a.path.split("/").length - b.path.split("/").length
       );
@@ -2950,8 +2958,9 @@ var SyncEngine = class {
             }
           }
         } else {
+          const noteHash = this.hash(note.content);
+          let contentUpdated = false;
           if (outlineDoc.text !== "") {
-            const noteHash = this.hash(note.content);
             const docHash = this.hash(outlineDoc.text);
             const titleChanged = note.title !== outlineDoc.title;
             if (noteHash !== docHash || titleChanged) {
@@ -2964,9 +2973,33 @@ var SyncEngine = class {
                   await this.writeNote(note.path, outlineDoc.text);
                 }
                 result.updated++;
+                contentUpdated = true;
               } catch (e) {
                 result.errors.push(`Update failed for ${note.path}: ${String(e)}`);
               }
+            }
+          } else {
+            const lastKnownHash = state.fileHashes[note.path];
+            if (lastKnownHash && noteHash !== lastKnownHash) {
+              try {
+                await this.client.updateDocument(outlineDoc.id, note.content, note.title);
+                result.updated++;
+                contentUpdated = true;
+              } catch (e) {
+                result.errors.push(`Update failed for ${note.path}: ${String(e)}`);
+              }
+            }
+          }
+          const { collectionId: expectedCollection, parentDocumentId: expectedParent } = this.collectionFromPath(note.path, collectionIdByName, state);
+          const currentParent = (_a = outlineDoc.parentDocumentId) != null ? _a : void 0;
+          if (expectedCollection && expectedParent !== currentParent) {
+            onProgress == null ? void 0 : onProgress(`Moving to correct parent: ${note.path}`);
+            try {
+              await this.client.moveDocument(outlineDoc.id, expectedCollection, expectedParent);
+              if (!contentUpdated)
+                result.updated++;
+            } catch (e) {
+              result.errors.push(`Move failed for ${note.path}: ${String(e)}`);
             }
           }
         }
@@ -3038,6 +3071,52 @@ var SyncEngine = class {
     state.lastSyncTime = Date.now();
     state.firstSyncDone = true;
     return result;
+  }
+  async ensureParentDocsForFolders(notes, collectionIdByName, outlineDocByKey, state) {
+    const notePaths = new Set(notes.map((n) => n.path));
+    const folderPaths = /* @__PURE__ */ new Set();
+    for (const note of notes) {
+      const parts = note.path.split("/");
+      for (let i = 2; i < parts.length; i++) {
+        folderPaths.add(parts.slice(0, i).join("/"));
+      }
+    }
+    const sorted = [...folderPaths].sort(
+      (a, b) => a.split("/").length - b.split("/").length
+    );
+    for (const folderPath of sorted) {
+      const flatFilePath = `${folderPath}.md`;
+      if (notePaths.has(flatFilePath))
+        continue;
+      if (state.pathToOutlineId[flatFilePath])
+        continue;
+      const { collectionId, parentDocumentId } = this.collectionFromPath(
+        flatFilePath,
+        collectionIdByName,
+        state
+      );
+      if (!collectionId)
+        continue;
+      const folderTitle = folderPath.split("/").pop();
+      const adoptKey = `${collectionId}::${folderTitle}`;
+      const existing = outlineDocByKey.get(adoptKey);
+      if (existing && !state.outlineIdMap[existing.id]) {
+        state.outlineIdMap[existing.id] = flatFilePath;
+        state.pathToOutlineId[flatFilePath] = existing.id;
+      } else if (!existing) {
+        try {
+          const created = await this.client.createDocument(
+            folderTitle,
+            "",
+            collectionId,
+            parentDocumentId
+          );
+          state.outlineIdMap[created.id] = flatFilePath;
+          state.pathToOutlineId[flatFilePath] = created.id;
+        } catch (e) {
+        }
+      }
+    }
   }
   async ensureCollections(notes, collections, onProgress) {
     const existingNames = new Set(collections.map((c) => c.name));

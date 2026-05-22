@@ -1,5 +1,4 @@
 import { App, TFile } from 'obsidian';
-import { createHash } from 'crypto';
 import { OutlineClient } from './outline-client';
 import {
   ObslineSettings,
@@ -607,7 +606,13 @@ export class SyncEngine {
     }
   }
 
+  // FNV-1a 32-bit — no Node.js crypto needed, works on iOS/Android
   private hash(content: string): string {
-    return createHash('md5').update(content).digest('hex');
+    let h = 2166136261;
+    for (let i = 0; i < content.length; i++) {
+      h ^= content.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h.toString(16);
   }
 }

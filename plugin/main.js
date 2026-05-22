@@ -2753,7 +2753,6 @@ var DEFAULT_SETTINGS = {
 
 // src/sync-engine.ts
 var import_obsidian2 = require("obsidian");
-var import_crypto = require("crypto");
 
 // src/outline-client.ts
 var import_obsidian = require("obsidian");
@@ -3337,8 +3336,14 @@ var SyncEngine = class {
       }
     }
   }
+  // FNV-1a 32-bit — no Node.js crypto needed, works on iOS/Android
   hash(content) {
-    return (0, import_crypto.createHash)("md5").update(content).digest("hex");
+    let h = 2166136261;
+    for (let i = 0; i < content.length; i++) {
+      h ^= content.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h.toString(16);
   }
 };
 

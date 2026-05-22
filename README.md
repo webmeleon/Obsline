@@ -1,4 +1,4 @@
-# Obsline v0.5.3
+# Obsline v0.5.4
 
 Bi-directional sync between [Obsidian](https://obsidian.md) and a self-hosted [Outline](https://www.getoutline.com/) instance.
 

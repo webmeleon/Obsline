@@ -124,9 +124,7 @@ export default class ObslinePlugin extends Plugin {
       this.settings.syncState = { ...this.settings.syncState };
       await this.saveSettings();
 
-      const msg = `Sync done: ${summary}`;
       this.updateStatus(`Last sync ${new Date().toLocaleTimeString()}`);
-      new Notice(`Obsline: ${msg}`);
 
       if (result.errors.length > 0) {
         new Notice(`Obsline: ${result.errors.length} error(s) — check console`, 8000);

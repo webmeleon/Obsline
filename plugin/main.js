@@ -3579,7 +3579,7 @@ var ObslinePlugin = class extends import_obsidian4.Plugin {
     this.updateStatus("Syncing\u2026");
     this.syncEngine.updateSettings(this.settings);
     try {
-      const result = await this.syncEngine.sync((msg2) => this.updateStatus(msg2));
+      const result = await this.syncEngine.sync((msg) => this.updateStatus(msg));
       const summary = [
         result.created > 0 && `+${result.created}`,
         result.updated > 0 && `~${result.updated}`,
@@ -3588,9 +3588,7 @@ var ObslinePlugin = class extends import_obsidian4.Plugin {
       ].filter(Boolean).join(" ") || "nothing new";
       this.settings.syncState = { ...this.settings.syncState };
       await this.saveSettings();
-      const msg = `Sync done: ${summary}`;
       this.updateStatus(`Last sync ${new Date().toLocaleTimeString()}`);
-      new import_obsidian4.Notice(`Obsline: ${msg}`);
       if (result.errors.length > 0) {
         new import_obsidian4.Notice(`Obsline: ${result.errors.length} error(s) \u2014 check console`, 8e3);
         result.errors.forEach((e) => console.error("[Obsline]", e));

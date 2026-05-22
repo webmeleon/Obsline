@@ -138,6 +138,18 @@ export class OutlineClient {
     }
   }
 
+  async moveDocument(id: string, collectionId: string, parentDocumentId?: string): Promise<void> {
+    try {
+      const payload: Record<string, unknown> = { id, collectionId };
+      if (parentDocumentId) payload.parentDocumentId = parentDocumentId;
+      await this.client.post('/documents.move', payload);
+      logger.info(`Moved document: ${id} → parent=${parentDocumentId ?? 'root'}`);
+    } catch (error) {
+      logger.error(`Failed to move document ${id}: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
   async deleteDocument(id: string): Promise<void> {
     try {
       await this.client.post('/documents.delete', { id });

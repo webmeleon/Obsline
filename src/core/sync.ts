@@ -55,8 +55,8 @@ export class SyncEngine {
       const updatedCollections = await this.ensureCollectionsForFolders(obsidianNotes, collections);
       const result = await this.syncBidirectional(obsidianNotes, outlineDocuments, updatedCollections);
 
-      await this.saveSyncState();
       this.syncState.lastSyncTime = startTime;
+      await this.saveSyncState();
 
       this.logger.info(
         `Sync completed: ${result.created} created, ${result.updated} updated, ` +
@@ -206,19 +206,42 @@ export class SyncEngine {
             result.created++;
           }
         }
-      } else if (outlineDoc.text !== '') {
+      } else {
         const noteHash = this.hashContent(note.content);
-        const outlineHash = this.hashContent(outlineDoc.text);
-        const titleChanged = note.title !== outlineDoc.title;
+        let contentUpdated = false;
 
-        if (noteHash !== outlineHash || titleChanged) {
-          const resolvedNote = this.resolveConflict(note, outlineDoc);
-          if (resolvedNote === note) {
-            await this.outlineClient.updateDocument(outlineDoc.id, note.content, note.title);
-          } else {
-            await this.obsidianReader.writeNote(note.path, resolvedNote.content);
+        if (outlineDoc.text !== '') {
+          const outlineHash = this.hashContent(outlineDoc.text);
+          const titleChanged = note.title !== outlineDoc.title;
+
+          if (noteHash !== outlineHash || titleChanged) {
+            const resolvedNote = this.resolveConflict(note, outlineDoc);
+            if (resolvedNote === note) {
+              await this.outlineClient.updateDocument(outlineDoc.id, note.content, note.title);
+            } else {
+              await this.obsidianReader.writeNote(note.path, resolvedNote.content);
+            }
+            result.updated++;
+            contentUpdated = true;
           }
-          result.updated++;
+        } else {
+          // Stub: Outline unchanged since last sync — push Obsidian changes if any
+          const lastKnownHash = this.syncState.fileHashes[note.path];
+          if (lastKnownHash && noteHash !== lastKnownHash) {
+            await this.outlineClient.updateDocument(outlineDoc.id, note.content, note.title);
+            result.updated++;
+            contentUpdated = true;
+          }
+        }
+
+        // Move document if parent has changed (e.g. flat docs from first sync)
+        const { collectionId: expectedCollection, parentDocumentId: expectedParent } =
+          this.extractCollectionAndParentFromPath(note.path, collectionIdByName);
+        const currentParent = outlineDoc.parentDocumentId ?? undefined;
+        if (expectedCollection && expectedParent !== currentParent) {
+          this.logger.info(`Moving "${note.path}" to correct parent in Outline`);
+          await this.outlineClient.moveDocument(outlineDoc.id, expectedCollection, expectedParent);
+          if (!contentUpdated) result.updated++;
         }
       }
 

@@ -285,6 +285,13 @@ export class SyncEngine {
       })
       .sort((a, b) => b.split('/').length - a.split('/').length); // deepest first
 
+    // Capture IDs before the loop clears state — needed for collection cleanup below
+    const deletedIds = new Set<string>(
+      pathsToDelete
+        .map(p => state.pathToOutlineId[p])
+        .filter((id): id is string => !!id),
+    );
+
     for (const obsPath of pathsToDelete) {
       const outlineId = state.pathToOutlineId[obsPath];
       if (!outlineId) continue; // may have been cleared by an earlier iteration
@@ -299,6 +306,28 @@ export class SyncEngine {
       delete state.pathToOutlineId[obsPath];
       delete state.fileHashes[obsPath];
       result.deleted++;
+    }
+
+    // ── Empty collection cleanup ────────────────────────────────────────────
+    // After document deletions, remove Outline collections that are now empty.
+    if (deletedIds.size > 0) {
+      const emptyCollections = updatedCollections.filter(col => {
+        if (col.name === this.settings.inboxCollection) return false;
+        // Only act on collections we actually deleted docs from in this pass
+        const hadDeletions = outlineDocsList.some(d => d.collectionId === col.id && deletedIds.has(d.id));
+        if (!hadDeletions) return false;
+        // Collection is now empty if every one of its docs was deleted
+        return outlineDocsList.every(d => d.collectionId !== col.id || deletedIds.has(d.id));
+      });
+      for (const col of emptyCollections) {
+        onProgress?.(`Removing empty collection: ${col.name}`);
+        try {
+          await this.client.deleteCollection(col.id);
+          result.deleted++;
+        } catch (e) {
+          result.errors.push(`Delete empty collection "${col.name}" failed: ${String(e)}`);
+        }
+      }
     }
 
     // ── Deletions: Outline → Obsidian ──────────────────────────────────────

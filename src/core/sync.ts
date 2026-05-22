@@ -287,6 +287,13 @@ export class SyncEngine {
       })
       .sort((a, b) => b.split('/').length - a.split('/').length); // deepest first
 
+    // Capture IDs before the loop clears state — needed for collection cleanup below
+    const deletedIds = new Set<string>(
+      pathsToDelete
+        .map(p => this.syncState.pathToOutlineId[p])
+        .filter((id): id is string => !!id),
+    );
+
     for (const obsPath of pathsToDelete) {
       const outlineId = this.syncState.pathToOutlineId[obsPath];
       if (!outlineId) continue;
@@ -301,6 +308,25 @@ export class SyncEngine {
       delete this.syncState.pathToOutlineId[obsPath];
       delete this.syncState.fileHashes[obsPath];
       result.deleted++;
+    }
+
+    // ── Empty collection cleanup ────────────────────────────────────────────
+    // After document deletions, remove Outline collections that are now empty.
+    if (deletedIds.size > 0) {
+      const emptyCollections = collections.filter(col => {
+        const hadDeletions = outlineDocuments.some(d => d.collectionId === col.id && deletedIds.has(d.id));
+        if (!hadDeletions) return false;
+        return outlineDocuments.every(d => d.collectionId !== col.id || deletedIds.has(d.id));
+      });
+      for (const col of emptyCollections) {
+        this.logger.info(`Removing empty collection: ${col.name}`);
+        try {
+          await this.outlineClient.deleteCollection(col.id);
+          result.deleted++;
+        } catch (e) {
+          this.logger.warn(`Delete empty collection "${col.name}" failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
     }
 
     // ── Deletions: Outline → Obsidian ──────────────────────────────────────

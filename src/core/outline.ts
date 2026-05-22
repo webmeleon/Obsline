@@ -191,4 +191,14 @@ export class OutlineClient {
       throw error;
     }
   }
+
+  async deleteCollection(id: string): Promise<void> {
+    try {
+      await this.client.post('/collections.delete', { id });
+      logger.info(`Deleted collection: ${id}`);
+    } catch (error) {
+      logger.error(`Failed to delete collection ${id}: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
 }

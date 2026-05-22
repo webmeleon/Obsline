@@ -3073,6 +3073,9 @@ var SyncEngine = class {
       const folderPrefix = obsPath.replace(/\.md$/, "/");
       return ![...obsidianMap.keys()].some((p) => p.startsWith(folderPrefix));
     }).sort((a, b) => b.split("/").length - a.split("/").length);
+    const deletedIds = new Set(
+      pathsToDelete.map((p) => state.pathToOutlineId[p]).filter((id) => !!id)
+    );
     for (const obsPath of pathsToDelete) {
       const outlineId = state.pathToOutlineId[obsPath];
       if (!outlineId)
@@ -3088,6 +3091,25 @@ var SyncEngine = class {
       delete state.pathToOutlineId[obsPath];
       delete state.fileHashes[obsPath];
       result.deleted++;
+    }
+    if (deletedIds.size > 0) {
+      const emptyCollections = updatedCollections.filter((col) => {
+        if (col.name === this.settings.inboxCollection)
+          return false;
+        const hadDeletions = outlineDocsList.some((d) => d.collectionId === col.id && deletedIds.has(d.id));
+        if (!hadDeletions)
+          return false;
+        return outlineDocsList.every((d) => d.collectionId !== col.id || deletedIds.has(d.id));
+      });
+      for (const col of emptyCollections) {
+        onProgress == null ? void 0 : onProgress(`Removing empty collection: ${col.name}`);
+        try {
+          await this.client.deleteCollection(col.id);
+          result.deleted++;
+        } catch (e) {
+          result.errors.push(`Delete empty collection "${col.name}" failed: ${String(e)}`);
+        }
+      }
     }
     for (const outlineId of knownIds) {
       const obsPath = state.outlineIdMap[outlineId];

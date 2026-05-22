@@ -96,8 +96,11 @@ export class SyncEngine {
       }
     }
 
+    // Build early — needed by ensureCollections to avoid recreating deleted collections
+    const outlineIdSet = new Set(outlineDocsList.map(d => d.id));
+
     // Ensure collections exist for all vault folders + inbox for root-level notes
-    const updatedCollections = await this.ensureCollections(vaultNotes, collections, onProgress);
+    const updatedCollections = await this.ensureCollections(vaultNotes, collections, outlineIdSet, onProgress);
     const collectionNameById = new Map(updatedCollections.map(c => [c.id, c.name]));
     const collectionIdByName = new Map(updatedCollections.map(c => [c.name, c.id]));
 
@@ -108,7 +111,6 @@ export class SyncEngine {
     }
 
     const obsidianMap = new Map(vaultNotes.map(n => [n.path, n]));
-    const outlineIdSet = new Set(outlineDocsList.map(d => d.id));
     const pathToOutlineIds = new Map<string, string[]>();
     for (const [oid, opath] of Object.entries(state.outlineIdMap)) {
       if (!pathToOutlineIds.has(opath)) pathToOutlineIds.set(opath, []);
@@ -420,6 +422,7 @@ export class SyncEngine {
   private async ensureCollections(
     notes: VaultNote[],
     collections: OutlineCollection[],
+    outlineIdSet: Set<string>,
     onProgress?: (msg: string) => void,
   ): Promise<OutlineCollection[]> {
     const existingNames = new Set(collections.map(c => c.name));
@@ -435,17 +438,26 @@ export class SyncEngine {
       folders.add(this.settings.inboxCollection);
     }
 
+    const state = this.settings.syncState;
     const updated = [...collections];
     for (const folder of folders) {
-      if (!existingNames.has(folder)) {
-        onProgress?.(`Creating Outline collection: ${folder}`);
-        try {
-          const col = await this.client.createCollection(folder);
-          updated.push(col);
-          existingNames.add(folder);
-        } catch (e) {
-          // non-fatal
-        }
+      if (existingNames.has(folder)) continue;
+
+      // Don't recreate a collection whose vault files all map to now-deleted Outline docs.
+      // The deletion pass will remove those Obsidian files on this same sync run.
+      const folderNotes = notes.filter(n => n.path.startsWith(folder + '/'));
+      if (folderNotes.length > 0 && folderNotes.every(n => {
+        const id = state.pathToOutlineId[n.path];
+        return id !== undefined && !outlineIdSet.has(id);
+      })) continue;
+
+      onProgress?.(`Creating Outline collection: ${folder}`);
+      try {
+        const col = await this.client.createCollection(folder);
+        updated.push(col);
+        existingNames.add(folder);
+      } catch (e) {
+        // non-fatal
       }
     }
     return updated;

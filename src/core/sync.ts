@@ -52,7 +52,8 @@ export class SyncEngine {
         this.outlineClient.listCollections(),
       ]);
 
-      const updatedCollections = await this.ensureCollectionsForFolders(obsidianNotes, collections);
+      const outlineIdSet = new Set(outlineDocuments.map(d => d.id));
+      const updatedCollections = await this.ensureCollectionsForFolders(obsidianNotes, collections, outlineIdSet);
       const result = await this.syncBidirectional(obsidianNotes, outlineDocuments, updatedCollections);
 
       this.syncState.lastSyncTime = startTime;
@@ -75,7 +76,8 @@ export class SyncEngine {
 
   private async ensureCollectionsForFolders(
     notes: ObsidianNote[],
-    collections: OutlineCollection[]
+    collections: OutlineCollection[],
+    outlineIdSet: Set<string>,
   ): Promise<OutlineCollection[]> {
     const existingNames = new Set(collections.map(c => c.name));
     const vaultFolders = new Set<string>();
@@ -90,12 +92,19 @@ export class SyncEngine {
 
     const updated = [...collections];
     for (const folder of vaultFolders) {
-      if (!existingNames.has(folder)) {
-        this.logger.info(`Creating collection for new folder: ${folder}`);
-        const newCollection = await this.outlineClient.createCollection(folder);
-        updated.push(newCollection);
-        existingNames.add(folder);
-      }
+      if (existingNames.has(folder)) continue;
+
+      // Don't recreate a collection whose vault files all map to now-deleted Outline docs.
+      const folderNotes = notes.filter(n => n.path.startsWith(folder + '/'));
+      if (folderNotes.length > 0 && folderNotes.every(n => {
+        const id = this.syncState.pathToOutlineId[n.path];
+        return id !== undefined && !outlineIdSet.has(id);
+      })) continue;
+
+      this.logger.info(`Creating collection for new folder: ${folder}`);
+      const newCollection = await this.outlineClient.createCollection(folder);
+      updated.push(newCollection);
+      existingNames.add(folder);
     }
 
     return updated;

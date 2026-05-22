@@ -2921,7 +2921,8 @@ var SyncEngine = class {
         docById.set(doc.id, stub);
       }
     }
-    const updatedCollections = await this.ensureCollections(vaultNotes, collections, onProgress);
+    const outlineIdSet = new Set(outlineDocsList.map((d) => d.id));
+    const updatedCollections = await this.ensureCollections(vaultNotes, collections, outlineIdSet, onProgress);
     const collectionNameById = new Map(updatedCollections.map((c) => [c.id, c.name]));
     const collectionIdByName = new Map(updatedCollections.map((c) => [c.name, c.id]));
     const outlineDocByKey = /* @__PURE__ */ new Map();
@@ -2929,7 +2930,6 @@ var SyncEngine = class {
       outlineDocByKey.set(`${doc.collectionId}::${doc.title}`, doc);
     }
     const obsidianMap = new Map(vaultNotes.map((n) => [n.path, n]));
-    const outlineIdSet = new Set(outlineDocsList.map((d) => d.id));
     const pathToOutlineIds = /* @__PURE__ */ new Map();
     for (const [oid, opath] of Object.entries(state.outlineIdMap)) {
       if (!pathToOutlineIds.has(opath))
@@ -3187,7 +3187,7 @@ var SyncEngine = class {
       }
     }
   }
-  async ensureCollections(notes, collections, onProgress) {
+  async ensureCollections(notes, collections, outlineIdSet, onProgress) {
     const existingNames = new Set(collections.map((c) => c.name));
     const folders = /* @__PURE__ */ new Set();
     const hasRootLevelNotes = notes.some((n) => !n.path.includes("/"));
@@ -3199,16 +3199,23 @@ var SyncEngine = class {
     if (hasRootLevelNotes) {
       folders.add(this.settings.inboxCollection);
     }
+    const state = this.settings.syncState;
     const updated = [...collections];
     for (const folder of folders) {
-      if (!existingNames.has(folder)) {
-        onProgress == null ? void 0 : onProgress(`Creating Outline collection: ${folder}`);
-        try {
-          const col = await this.client.createCollection(folder);
-          updated.push(col);
-          existingNames.add(folder);
-        } catch (e) {
-        }
+      if (existingNames.has(folder))
+        continue;
+      const folderNotes = notes.filter((n) => n.path.startsWith(folder + "/"));
+      if (folderNotes.length > 0 && folderNotes.every((n) => {
+        const id = state.pathToOutlineId[n.path];
+        return id !== void 0 && !outlineIdSet.has(id);
+      }))
+        continue;
+      onProgress == null ? void 0 : onProgress(`Creating Outline collection: ${folder}`);
+      try {
+        const col = await this.client.createCollection(folder);
+        updated.push(col);
+        existingNames.add(folder);
+      } catch (e) {
       }
     }
     return updated;

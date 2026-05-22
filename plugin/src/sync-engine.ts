@@ -444,10 +444,11 @@ export class SyncEngine {
   private async ensureFolder(notePath: string): Promise<void> {
     const parts = notePath.split('/');
     parts.pop();
-    if (parts.length === 0) return;
-    const folderPath = parts.join('/');
-    if (!this.app.vault.getAbstractFileByPath(folderPath)) {
-      await this.app.vault.createFolder(folderPath);
+    for (let i = 1; i <= parts.length; i++) {
+      const folderPath = parts.slice(0, i).join('/');
+      if (!this.app.vault.getAbstractFileByPath(folderPath)) {
+        await this.app.vault.createFolder(folderPath);
+      }
     }
   }
 

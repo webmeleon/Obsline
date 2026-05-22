@@ -51,23 +51,26 @@ export class OutlineClient {
   }
 
   async listDocuments(): Promise<OutlineDocument[]> {
-    const res = await this.post<{
-      data: Array<{
-        id: string;
-        title: string;
-        updatedAt: string;
-        createdAt: string;
-        collectionId: string;
-        parentDocumentId: string | null;
-        published: boolean;
-      }>;
-    }>('/documents.list', {});
+    type DocEntry = {
+      id: string; title: string; updatedAt: string; createdAt: string;
+      collectionId: string; parentDocumentId: string | null; published: boolean;
+    };
+    const all: OutlineDocument[] = [];
+    const limit = 100;
+    let offset = 0;
 
-    return res.data.map(doc => ({
-      ...doc,
-      text: '',
-      published: doc.published ?? false,
-    }));
+    while (true) {
+      const res = await this.post<{ data: DocEntry[]; pagination: { total: number } }>(
+        '/documents.list', { limit, offset },
+      );
+      all.push(...res.data.map(doc => ({
+        ...doc, text: '', published: doc.published ?? false,
+      })));
+      offset += res.data.length;
+      if (res.data.length < limit) break;
+    }
+
+    return all;
   }
 
   async getDocument(id: string): Promise<OutlineDocument> {

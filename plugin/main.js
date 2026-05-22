@@ -2798,15 +2798,27 @@ var OutlineClient = class {
     return res.data;
   }
   async listDocuments() {
-    const res = await this.post("/documents.list", {});
-    return res.data.map((doc) => {
-      var _a;
-      return {
-        ...doc,
-        text: "",
-        published: (_a = doc.published) != null ? _a : false
-      };
-    });
+    const all = [];
+    const limit = 100;
+    let offset = 0;
+    while (true) {
+      const res = await this.post(
+        "/documents.list",
+        { limit, offset }
+      );
+      all.push(...res.data.map((doc) => {
+        var _a;
+        return {
+          ...doc,
+          text: "",
+          published: (_a = doc.published) != null ? _a : false
+        };
+      }));
+      offset += res.data.length;
+      if (res.data.length < limit)
+        break;
+    }
+    return all;
   }
   async getDocument(id) {
     var _a;
@@ -3195,11 +3207,11 @@ var SyncEngine = class {
   async ensureFolder(notePath) {
     const parts = notePath.split("/");
     parts.pop();
-    if (parts.length === 0)
-      return;
-    const folderPath = parts.join("/");
-    if (!this.app.vault.getAbstractFileByPath(folderPath)) {
-      await this.app.vault.createFolder(folderPath);
+    for (let i = 1; i <= parts.length; i++) {
+      const folderPath = parts.slice(0, i).join("/");
+      if (!this.app.vault.getAbstractFileByPath(folderPath)) {
+        await this.app.vault.createFolder(folderPath);
+      }
     }
   }
   /**

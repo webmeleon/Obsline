@@ -75,19 +75,27 @@ export class OutlineClient {
   }
 
   async listDocuments(): Promise<OutlineDocument[]> {
+    const all: OutlineDocument[] = [];
+    const limit = 100;
+    let offset = 0;
+
     try {
-      const response = await this.client.post<OutlineListResponse>('/documents.list', {});
-      logger.debug(`Listed ${response.data.data.length} documents`);
-      return response.data.data.map(doc => ({
-        id: doc.id,
-        title: doc.title,
-        text: '',
-        updatedAt: doc.updatedAt,
-        createdAt: doc.createdAt,
-        collectionId: doc.collectionId,
-        parentDocumentId: doc.parentDocumentId,
-        published: doc.published ?? false,
-      }));
+      while (true) {
+        const response = await this.client.post<OutlineListResponse & { pagination: { total: number } }>(
+          '/documents.list', { limit, offset }
+        );
+        const docs = response.data.data.map(doc => ({
+          id: doc.id, title: doc.title, text: '',
+          updatedAt: doc.updatedAt, createdAt: doc.createdAt,
+          collectionId: doc.collectionId, parentDocumentId: doc.parentDocumentId,
+          published: doc.published ?? false,
+        }));
+        all.push(...docs);
+        offset += docs.length;
+        if (docs.length < limit) break;
+      }
+      logger.debug(`Listed ${all.length} documents`);
+      return all;
     } catch (error) {
       logger.error(`Failed to list documents: ${error instanceof Error ? error.message : String(error)}`);
       throw error;

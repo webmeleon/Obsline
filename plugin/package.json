@@ -1,6 +1,6 @@
 {
   "name": "obsline-plugin",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Obsidian plugin for Obsline – Outline Sync",
   "main": "main.js",
   "scripts": {
@@ -16,5 +16,8 @@
     "esbuild": "0.17.3",
     "obsidian": "latest",
     "typescript": "^5.1.0"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
   }
 }

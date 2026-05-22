@@ -1,7 +1,10 @@
-import { Plugin, Notice, TFile, TAbstractFile } from 'obsidian';
+import { Plugin, Notice, TFile, TAbstractFile, requestUrl } from 'obsidian';
 import { ObslineSettings, DEFAULT_SETTINGS } from './types';
 import { SyncEngine } from './sync-engine';
 import { ObslineSettingTab } from './settings';
+import JSZip from 'jszip';
+
+const GITHUB_REPO = 'webmeleon/Obsline';
 
 const DEBOUNCE_MS = 30_000; // 30 s after last change
 
@@ -43,6 +46,9 @@ export default class ObslinePlugin extends Plugin {
 
     // Start sync scheduler
     this.setupSync();
+
+    // Check for updates after startup
+    setTimeout(() => this.checkForUpdates(), 5000);
 
     console.log('Obsline plugin loaded');
   }
@@ -148,5 +154,67 @@ export default class ObslinePlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  private async checkForUpdates() {
+    try {
+      const response = await requestUrl({
+        url: `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`,
+        headers: { 'User-Agent': 'Obsline-Plugin' },
+      });
+
+      const release = response.json;
+      const latestVersion = (release.tag_name as string).replace('v', '');
+
+      if (!this.isNewerVersion(latestVersion, this.manifest.version)) return;
+
+      const frag = document.createDocumentFragment();
+      frag.appendText(`Obsline v${latestVersion} verfügbar. `);
+      const btn = frag.createEl('button', { text: 'Jetzt updaten' });
+      const notice = new Notice(frag, 0);
+
+      btn.onclick = async () => {
+        notice.hide();
+        await this.installUpdate(latestVersion, release);
+      };
+    } catch (e) {
+      console.log('[Obsline] Update-Check fehlgeschlagen:', e);
+    }
+  }
+
+  private async installUpdate(version: string, release: any) {
+    const progress = new Notice('Obsline: Update wird heruntergeladen…', 0);
+    try {
+      const zipAsset = release.assets?.find((a: any) => a.name.endsWith('.zip'));
+      const zipUrl = zipAsset?.browser_download_url
+        ?? `https://github.com/${GITHUB_REPO}/releases/download/v${version}/obsline-v${version}.zip`;
+
+      const zipResponse = await requestUrl({ url: zipUrl });
+      const zip = await JSZip.loadAsync(zipResponse.arrayBuffer);
+
+      const pluginDir = `${this.app.vault.configDir}/plugins/obsline`;
+
+      for (const filename of ['main.js', 'manifest.json', 'styles.css']) {
+        const file = zip.file(filename);
+        if (file) {
+          const content = await file.async('string');
+          await this.app.vault.adapter.write(`${pluginDir}/${filename}`, content);
+        }
+      }
+
+      progress.hide();
+      new Notice('Obsline aktualisiert! Obsidian neu starten um die Änderungen zu übernehmen.', 0);
+    } catch (e) {
+      progress.hide();
+      new Notice(`Obsline Update fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}`, 8000);
+      console.error('[Obsline] Update fehlgeschlagen:', e);
+    }
+  }
+
+  private isNewerVersion(latest: string, current: string): boolean {
+    const parse = (v: string) => v.split('.').map(Number);
+    const [la, lb, lc] = parse(latest);
+    const [ca, cb, cc] = parse(current);
+    return la > ca || (la === ca && lb > cb) || (la === ca && lb === cb && lc > cc);
   }
 }

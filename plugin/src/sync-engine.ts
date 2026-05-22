@@ -37,6 +37,10 @@ export class SyncEngine {
     return this.client.testConnection();
   }
 
+  async deleteOutlineDoc(id: string): Promise<void> {
+    await this.client.deleteDocument(id);
+  }
+
   async sync(onProgress?: (msg: string) => void): Promise<SyncResult> {
     const result: SyncResult = { created: 0, updated: 0, deleted: 0, renamed: 0, conflicts: [], errors: [] };
     const state = this.settings.syncState;

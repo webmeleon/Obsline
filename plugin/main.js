@@ -2854,6 +2854,9 @@ var SyncEngine = class {
   async testConnection() {
     return this.client.testConnection();
   }
+  async deleteOutlineDoc(id) {
+    await this.client.deleteDocument(id);
+  }
   async sync(onProgress) {
     var _a;
     const result = { created: 0, updated: 0, deleted: 0, renamed: 0, conflicts: [], errors: [] };
@@ -3369,6 +3372,49 @@ var ObslineSettingTab = class extends import_obsidian3.PluginSettingTab {
         })
       );
     }
+    containerEl.createEl("h3", { text: "Danger zone" });
+    new import_obsidian3.Setting(containerEl).setName("Reset Outline").setDesc("Deletes all tracked documents from Outline and resets the sync state. Use this before a clean first sync from Obsidian.").addButton((btn) => {
+      btn.setButtonText("Reset Outline").setWarning();
+      let confirmed = false;
+      btn.onClick(async () => {
+        if (!confirmed) {
+          confirmed = true;
+          btn.setButtonText("Sicher? Nochmal klicken");
+          setTimeout(() => {
+            confirmed = false;
+            btn.setButtonText("Reset Outline");
+          }, 4e3);
+          return;
+        }
+        btn.setDisabled(true).setButtonText("Wird gel\xF6scht\u2026");
+        const state = this.plugin.settings.syncState;
+        const ids = Object.keys(state.outlineIdMap);
+        let deleted = 0;
+        let failed = 0;
+        for (const id of ids) {
+          try {
+            await this.plugin.syncEngine.deleteOutlineDoc(id);
+            deleted++;
+          } catch (e) {
+            failed++;
+          }
+        }
+        this.plugin.settings.syncState = {
+          lastSyncTime: 0,
+          fileHashes: {},
+          outlineIdMap: {},
+          pathToOutlineId: {},
+          firstSyncDone: false
+        };
+        await this.plugin.saveSettings();
+        btn.setDisabled(false).setButtonText("Reset Outline");
+        new import_obsidian3.Notice(
+          `Outline reset: ${deleted} Dokumente gel\xF6scht${failed > 0 ? `, ${failed} fehlgeschlagen` : ""}. Sync state zur\xFCckgesetzt.`,
+          8e3
+        );
+        this.display();
+      });
+    });
     containerEl.createEl("h3", { text: "Status" });
     const lastSync = this.plugin.settings.syncState.lastSyncTime;
     const trackedCount = Object.keys(this.plugin.settings.syncState.outlineIdMap).length;

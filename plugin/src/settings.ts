@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, Notice } from 'obsidian';
+import { App, PluginSettingTab, Setting, Notice, Modal } from 'obsidian';
 import type ObslinePlugin from './main';
 import { ConflictResolution, InitialSyncDirection } from './types';
 
@@ -193,6 +193,60 @@ export class ObslineSettingTab extends PluginSettingTab {
             }),
         );
     }
+
+    // ── Danger zone ─────────────────────────────────────────────────────────
+
+    containerEl.createEl('h3', { text: 'Danger zone' });
+
+    new Setting(containerEl)
+      .setName('Reset Outline')
+      .setDesc('Deletes all tracked documents from Outline and resets the sync state. Use this before a clean first sync from Obsidian.')
+      .addButton(btn => {
+        btn.setButtonText('Reset Outline').setWarning();
+        let confirmed = false;
+        btn.onClick(async () => {
+          if (!confirmed) {
+            confirmed = true;
+            btn.setButtonText('Sicher? Nochmal klicken');
+            setTimeout(() => {
+              confirmed = false;
+              btn.setButtonText('Reset Outline');
+            }, 4000);
+            return;
+          }
+
+          btn.setDisabled(true).setButtonText('Wird gelöscht…');
+          const state = this.plugin.settings.syncState;
+          const ids = Object.keys(state.outlineIdMap);
+          let deleted = 0;
+          let failed = 0;
+
+          for (const id of ids) {
+            try {
+              await this.plugin.syncEngine.deleteOutlineDoc(id);
+              deleted++;
+            } catch {
+              failed++;
+            }
+          }
+
+          this.plugin.settings.syncState = {
+            lastSyncTime: 0,
+            fileHashes: {},
+            outlineIdMap: {},
+            pathToOutlineId: {},
+            firstSyncDone: false,
+          };
+          await this.plugin.saveSettings();
+
+          btn.setDisabled(false).setButtonText('Reset Outline');
+          new Notice(
+            `Outline reset: ${deleted} Dokumente gelöscht${failed > 0 ? `, ${failed} fehlgeschlagen` : ''}. Sync state zurückgesetzt.`,
+            8000,
+          );
+          this.display();
+        });
+      });
 
     // ── Status ───────────────────────────────────────────────────────────────
 

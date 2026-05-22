@@ -41,6 +41,21 @@ export class SyncEngine {
     await this.client.deleteDocument(id);
   }
 
+  async deleteAllOutline(): Promise<{ deleted: number; failed: number }> {
+    const collections = await this.client.listCollections();
+    let deleted = 0;
+    let failed = 0;
+    for (const col of collections) {
+      try {
+        await this.client.deleteCollection(col.id);
+        deleted++;
+      } catch {
+        failed++;
+      }
+    }
+    return { deleted, failed };
+  }
+
   async sync(onProgress?: (msg: string) => void): Promise<SyncResult> {
     const result: SyncResult = { created: 0, updated: 0, deleted: 0, renamed: 0, conflicts: [], errors: [] };
     const state = this.settings.syncState;

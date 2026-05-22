@@ -171,77 +171,58 @@ export class ObslineSettingTab extends PluginSettingTab {
           });
       });
 
-    if (firstDone) {
-      new Setting(containerEl)
-        .setName('Reset sync state')
-        .setDesc('Clears all sync mappings and resets the first-sync flag. Use with caution — the next sync will re-evaluate all documents.')
-        .addButton(btn =>
-          btn
-            .setButtonText('Reset')
-            .setWarning()
-            .onClick(async () => {
-              this.plugin.settings.syncState = {
-                lastSyncTime: 0,
-                fileHashes: {},
-                outlineIdMap: {},
-                pathToOutlineId: {},
-                firstSyncDone: false,
-              };
-              await this.plugin.saveSettings();
-              new Notice('Sync state reset. Choose a first-sync direction and sync again.');
-              this.display();
-            }),
-        );
-    }
 
     // ── Danger zone ─────────────────────────────────────────────────────────
 
     containerEl.createEl('h3', { text: 'Danger zone' });
 
     new Setting(containerEl)
-      .setName('Reset Outline')
-      .setDesc('Deletes all tracked documents from Outline and resets the sync state. Use this before a clean first sync from Obsidian.')
+      .setName('Sync State zurücksetzen')
+      .setDesc('Löscht nur das lokale Tracking — Outline-Daten bleiben vollständig erhalten. Ideal wenn du einen neuen PC einrichtest und Obsidian mit den bestehenden Outline-Daten befüllen möchtest.')
       .addButton(btn => {
-        btn.setButtonText('Reset Outline').setWarning();
+        btn.setButtonText('Sync State zurücksetzen').setWarning();
         let confirmed = false;
         btn.onClick(async () => {
           if (!confirmed) {
             confirmed = true;
             btn.setButtonText('Sicher? Nochmal klicken');
-            setTimeout(() => {
-              confirmed = false;
-              btn.setButtonText('Reset Outline');
-            }, 4000);
+            setTimeout(() => { confirmed = false; btn.setButtonText('Sync State zurücksetzen'); }, 4000);
+            return;
+          }
+          this.plugin.settings.syncState = {
+            lastSyncTime: 0, fileHashes: {}, outlineIdMap: {}, pathToOutlineId: {}, firstSyncDone: false,
+          };
+          await this.plugin.saveSettings();
+          new Notice('Sync State zurückgesetzt. Outline-Daten sind noch online vorhanden.');
+          this.display();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName('Alles in Outline löschen')
+      .setDesc('⚠️ Löscht ALLE Sammlungen und Dokumente in Outline. Danach ist alles online weg! Nutze dies für eine cleane Umgebung vor einem First Sync von Obsidian.')
+      .addButton(btn => {
+        btn.setButtonText('Alles in Outline löschen').setWarning();
+        let confirmed = false;
+        btn.onClick(async () => {
+          if (!confirmed) {
+            confirmed = true;
+            btn.setButtonText('⚠️ Sicher? Alles wird gelöscht!');
+            setTimeout(() => { confirmed = false; btn.setButtonText('Alles in Outline löschen'); }, 4000);
             return;
           }
 
           btn.setDisabled(true).setButtonText('Wird gelöscht…');
-          const state = this.plugin.settings.syncState;
-          const ids = Object.keys(state.outlineIdMap);
-          let deleted = 0;
-          let failed = 0;
-
-          for (const id of ids) {
-            try {
-              await this.plugin.syncEngine.deleteOutlineDoc(id);
-              deleted++;
-            } catch {
-              failed++;
-            }
-          }
+          const { deleted, failed } = await this.plugin.syncEngine.deleteAllOutline();
 
           this.plugin.settings.syncState = {
-            lastSyncTime: 0,
-            fileHashes: {},
-            outlineIdMap: {},
-            pathToOutlineId: {},
-            firstSyncDone: false,
+            lastSyncTime: 0, fileHashes: {}, outlineIdMap: {}, pathToOutlineId: {}, firstSyncDone: false,
           };
           await this.plugin.saveSettings();
 
-          btn.setDisabled(false).setButtonText('Reset Outline');
+          btn.setDisabled(false).setButtonText('Alles in Outline löschen');
           new Notice(
-            `Outline reset: ${deleted} Dokumente gelöscht${failed > 0 ? `, ${failed} fehlgeschlagen` : ''}. Sync state zurückgesetzt.`,
+            `Outline geleert: ${deleted} Sammlungen gelöscht${failed > 0 ? `, ${failed} fehlgeschlagen` : ''}. Sync State zurückgesetzt.`,
             8000,
           );
           this.display();

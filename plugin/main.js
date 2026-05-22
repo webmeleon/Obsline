@@ -2841,6 +2841,9 @@ var OutlineClient = class {
     const res = await this.post("/documents.update", body);
     return { ...res.data, published: true };
   }
+  async deleteCollection(id) {
+    await this.post("/collections.delete", { id });
+  }
   async moveDocument(id, collectionId, parentDocumentId) {
     const body = { id, collectionId };
     if (parentDocumentId)
@@ -2868,6 +2871,20 @@ var SyncEngine = class {
   }
   async deleteOutlineDoc(id) {
     await this.client.deleteDocument(id);
+  }
+  async deleteAllOutline() {
+    const collections = await this.client.listCollections();
+    let deleted = 0;
+    let failed = 0;
+    for (const col of collections) {
+      try {
+        await this.client.deleteCollection(col.id);
+        deleted++;
+      } catch (e) {
+        failed++;
+      }
+    }
+    return { deleted, failed };
   }
   async sync(onProgress) {
     var _a;
@@ -3368,25 +3385,9 @@ var ObslineSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       });
     });
-    if (firstDone) {
-      new import_obsidian3.Setting(containerEl).setName("Reset sync state").setDesc("Clears all sync mappings and resets the first-sync flag. Use with caution \u2014 the next sync will re-evaluate all documents.").addButton(
-        (btn) => btn.setButtonText("Reset").setWarning().onClick(async () => {
-          this.plugin.settings.syncState = {
-            lastSyncTime: 0,
-            fileHashes: {},
-            outlineIdMap: {},
-            pathToOutlineId: {},
-            firstSyncDone: false
-          };
-          await this.plugin.saveSettings();
-          new import_obsidian3.Notice("Sync state reset. Choose a first-sync direction and sync again.");
-          this.display();
-        })
-      );
-    }
     containerEl.createEl("h3", { text: "Danger zone" });
-    new import_obsidian3.Setting(containerEl).setName("Reset Outline").setDesc("Deletes all tracked documents from Outline and resets the sync state. Use this before a clean first sync from Obsidian.").addButton((btn) => {
-      btn.setButtonText("Reset Outline").setWarning();
+    new import_obsidian3.Setting(containerEl).setName("Sync State zur\xFCcksetzen").setDesc("L\xF6scht nur das lokale Tracking \u2014 Outline-Daten bleiben vollst\xE4ndig erhalten. Ideal wenn du einen neuen PC einrichtest und Obsidian mit den bestehenden Outline-Daten bef\xFCllen m\xF6chtest.").addButton((btn) => {
+      btn.setButtonText("Sync State zur\xFCcksetzen").setWarning();
       let confirmed = false;
       btn.onClick(async () => {
         if (!confirmed) {
@@ -3394,22 +3395,9 @@ var ObslineSettingTab = class extends import_obsidian3.PluginSettingTab {
           btn.setButtonText("Sicher? Nochmal klicken");
           setTimeout(() => {
             confirmed = false;
-            btn.setButtonText("Reset Outline");
+            btn.setButtonText("Sync State zur\xFCcksetzen");
           }, 4e3);
           return;
-        }
-        btn.setDisabled(true).setButtonText("Wird gel\xF6scht\u2026");
-        const state = this.plugin.settings.syncState;
-        const ids = Object.keys(state.outlineIdMap);
-        let deleted = 0;
-        let failed = 0;
-        for (const id of ids) {
-          try {
-            await this.plugin.syncEngine.deleteOutlineDoc(id);
-            deleted++;
-          } catch (e) {
-            failed++;
-          }
         }
         this.plugin.settings.syncState = {
           lastSyncTime: 0,
@@ -3419,9 +3407,36 @@ var ObslineSettingTab = class extends import_obsidian3.PluginSettingTab {
           firstSyncDone: false
         };
         await this.plugin.saveSettings();
-        btn.setDisabled(false).setButtonText("Reset Outline");
+        new import_obsidian3.Notice("Sync State zur\xFCckgesetzt. Outline-Daten sind noch online vorhanden.");
+        this.display();
+      });
+    });
+    new import_obsidian3.Setting(containerEl).setName("Alles in Outline l\xF6schen").setDesc("\u26A0\uFE0F L\xF6scht ALLE Sammlungen und Dokumente in Outline. Danach ist alles online weg! Nutze dies f\xFCr eine cleane Umgebung vor einem First Sync von Obsidian.").addButton((btn) => {
+      btn.setButtonText("Alles in Outline l\xF6schen").setWarning();
+      let confirmed = false;
+      btn.onClick(async () => {
+        if (!confirmed) {
+          confirmed = true;
+          btn.setButtonText("\u26A0\uFE0F Sicher? Alles wird gel\xF6scht!");
+          setTimeout(() => {
+            confirmed = false;
+            btn.setButtonText("Alles in Outline l\xF6schen");
+          }, 4e3);
+          return;
+        }
+        btn.setDisabled(true).setButtonText("Wird gel\xF6scht\u2026");
+        const { deleted, failed } = await this.plugin.syncEngine.deleteAllOutline();
+        this.plugin.settings.syncState = {
+          lastSyncTime: 0,
+          fileHashes: {},
+          outlineIdMap: {},
+          pathToOutlineId: {},
+          firstSyncDone: false
+        };
+        await this.plugin.saveSettings();
+        btn.setDisabled(false).setButtonText("Alles in Outline l\xF6schen");
         new import_obsidian3.Notice(
-          `Outline reset: ${deleted} Dokumente gel\xF6scht${failed > 0 ? `, ${failed} fehlgeschlagen` : ""}. Sync state zur\xFCckgesetzt.`,
+          `Outline geleert: ${deleted} Sammlungen gel\xF6scht${failed > 0 ? `, ${failed} fehlgeschlagen` : ""}. Sync State zur\xFCckgesetzt.`,
           8e3
         );
         this.display();

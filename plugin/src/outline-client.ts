@@ -98,6 +98,10 @@ export class OutlineClient {
     return { ...res.data, published: true };
   }
 
+  async deleteCollection(id: string): Promise<void> {
+    await this.post('/collections.delete', { id });
+  }
+
   async moveDocument(id: string, collectionId: string, parentDocumentId?: string): Promise<void> {
     const body: Record<string, unknown> = { id, collectionId };
     if (parentDocumentId) body.parentDocumentId = parentDocumentId;

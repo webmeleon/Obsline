@@ -11,6 +11,8 @@ export class OutlineClient {
   }
 
   private async post<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
+    // throw:false — Obsidian's requestUrl throws on network errors by default,
+    // but we want to handle 4xx/5xx ourselves rather than get an opaque exception.
     const response = await requestUrl({
       url: `${this.apiBase}${endpoint}`,
       method: 'POST',
@@ -84,6 +86,7 @@ export class OutlineClient {
     collectionId?: string,
     parentDocumentId?: string,
   ): Promise<OutlineDocument> {
+    // publish:true required — omitting it creates a Draft invisible to other users.
     const body: Record<string, unknown> = { title, text, publish: true };
     if (collectionId) body.collectionId = collectionId;
     if (parentDocumentId) body.parentDocumentId = parentDocumentId;

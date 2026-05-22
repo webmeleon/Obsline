@@ -1,4 +1,4 @@
-# Obsline v0.4.0
+# Obsline v0.5.3
 
 Bi-directional sync between [Obsidian](https://obsidian.md) and a self-hosted [Outline](https://www.getoutline.com/) instance.
 
@@ -13,6 +13,8 @@ Bi-directional sync between [Obsidian](https://obsidian.md) and a self-hosted [O
 - **Auto-collection creation** — new Obsidian folders automatically create Outline collections
 - **Conflict resolution** — last-write-wins, Obsidian-wins, or Outline-wins
 - **Initial sync direction** — choose which side is authoritative on the very first sync
+- **Auto-update** — plugin checks for new releases on load and offers one-click in-place update
+- **Danger zone** — reset local sync state or wipe all Outline data for a clean first sync
 - **Cross-platform** — Windows, Mac, Linux
 
 ---
@@ -23,7 +25,7 @@ Bi-directional sync between [Obsidian](https://obsidian.md) and a self-hosted [O
 
 **Option A — Download release (no build required)**
 
-1. Download `obsline-v0.4.0.zip` from the [latest release](https://github.com/webmeleon/Obsline/releases/latest)
+1. Download `obsline-v0.5.3.zip` from the [latest release](https://github.com/webmeleon/Obsline/releases/latest)
 2. Unzip and run the install script:
 
    ```bash
@@ -93,6 +95,17 @@ Projects                    Projects/
 
 Parent notes stay flat. Children appear in a same-named subfolder.
 
+### Auto-update
+
+When a new release is available, Obsline shows a notification on startup with an **Update now** button. Clicking it downloads and extracts the release ZIP directly into the plugin folder. Restart Obsidian afterwards to activate the new version.
+
+### Danger zone
+
+Found in Settings → Obsline → **Danger zone**:
+
+- **Sync State zurücksetzen** — clears local tracking only (Outline data untouched). Use this when setting up a new machine and you want Obsidian to pull existing Outline content.
+- **Alles in Outline löschen** — deletes ALL collections and documents from Outline, then resets local state. Use before a clean first sync from Obsidian. Both actions require a double-click confirmation.
+
 ---
 
 ## CLI Tool
@@ -158,8 +171,8 @@ obsline/
 │   └── version.ts         # Shared version constant
 ├── plugin/            # Obsidian plugin (esbuild bundle)
 │   ├── src/
-│   │   ├── main.ts          # Plugin lifecycle
-│   │   ├── settings.ts      # Settings UI
+│   │   ├── main.ts          # Plugin lifecycle + auto-update
+│   │   ├── settings.ts      # Settings UI + danger zone
 │   │   ├── sync-engine.ts   # Sync engine (Obsidian Vault API)
 │   │   ├── outline-client.ts # Outline REST client (requestUrl)
 │   │   └── types.ts         # Shared types

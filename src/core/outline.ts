@@ -120,6 +120,7 @@ export class OutlineClient {
     parentDocumentId?: string
   ): Promise<OutlineDocument> {
     try {
+      // publish:true required — omitting it creates a Draft invisible to other users.
       const payload: Record<string, unknown> = { title, text, publish: true };
       if (collectionId) payload.collectionId = collectionId;
       if (parentDocumentId) payload.parentDocumentId = parentDocumentId;

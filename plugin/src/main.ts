@@ -47,7 +47,7 @@ export default class ObslinePlugin extends Plugin {
     // Start sync scheduler
     this.setupSync();
 
-    // Check for updates after startup
+    // Delay so Obsidian finishes loading before the network request fires.
     setTimeout(() => this.checkForUpdates(), 5000);
 
     console.log('Obsline plugin loaded');
@@ -120,6 +120,7 @@ export default class ObslinePlugin extends Plugin {
         .filter(Boolean)
         .join(' ') || 'nothing new';
 
+      // Shallow copy forces Obsidian to serialize the nested syncState object.
       this.settings.syncState = { ...this.settings.syncState };
       await this.saveSettings();
 

@@ -147,6 +147,8 @@ export class SyncEngine {
           this.logger.warn(`Failed to load document ${doc.id}: ${error instanceof Error ? error.message : String(error)}`);
         }
       } else {
+        // text:'' marks this as a stub; the Obsidian→Outline pass detects this
+        // and falls back to fileHashes for change detection instead of content diff.
         const stub: OutlineDocument = { ...doc, text: '' };
         fullOutlineDocs.push(stub);
         docById.set(doc.id, stub);
@@ -286,7 +288,7 @@ export class SyncEngine {
     // ── Deletions: Obsidian → Outline ──────────────────────────────────────
     // Uses snapshot keys; rename detection above may have cleared a path from state,
     // so we re-check state[obsPath] before acting.
-    // Sort deepest paths first so children are deleted before parents (Outline 403s on parent with children).
+    // Outline returns 403 when you delete a parent that still has children — deepest first avoids that.
     const pathsToDelete = knownPaths
       .filter(obsPath => {
         const outlineId = this.syncState.pathToOutlineId[obsPath];
@@ -524,6 +526,7 @@ export class SyncEngine {
           lastSyncTime: raw.lastSyncTime ?? 0,
           fileHashes: raw.fileHashes ?? {},
           outlineIdMap: raw.outlineIdMap ?? {},
+          // Backwards-compat: older state files lack pathToOutlineId, rebuild from outlineIdMap.
           pathToOutlineId: raw.pathToOutlineId ??
             Object.fromEntries(Object.entries(raw.outlineIdMap ?? {}).map(([id, p]) => [p, id])),
         };

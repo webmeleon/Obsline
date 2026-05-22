@@ -3116,7 +3116,7 @@ var SyncEngine = class {
       if (!obsPath || outlineIdSet.has(outlineId))
         continue;
       const folderPrefix = obsPath.replace(/\.md$/, "/");
-      if ([...obsidianMap.keys()].some((p) => p.startsWith(folderPrefix))) {
+      if (!obsidianMap.has(obsPath) && [...obsidianMap.keys()].some((p) => p.startsWith(folderPrefix))) {
         delete state.outlineIdMap[outlineId];
         delete state.pathToOutlineId[obsPath];
         continue;

@@ -337,9 +337,11 @@ export class SyncEngine {
       const obsPath = state.outlineIdMap[outlineId];
       if (!obsPath || outlineIdSet.has(outlineId)) continue;
 
-      // Skip virtual parent paths — they have no real Obsidian file to delete
+      // Skip virtual parent paths — they have no real Obsidian file to delete.
+      // Only applies when the path is NOT a real vault file (coexistence pattern:
+      // a real note like Website.md can also be a parent of Website/).
       const folderPrefix = obsPath.replace(/\.md$/, '/');
-      if ([...obsidianMap.keys()].some(p => p.startsWith(folderPrefix))) {
+      if (!obsidianMap.has(obsPath) && [...obsidianMap.keys()].some(p => p.startsWith(folderPrefix))) {
         delete state.outlineIdMap[outlineId];
         delete state.pathToOutlineId[obsPath];
         continue;

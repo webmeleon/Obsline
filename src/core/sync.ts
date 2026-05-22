@@ -279,35 +279,50 @@ export class SyncEngine {
     // so we re-check state[obsPath] before acting.
     for (const obsPath of knownPaths) {
       const outlineId = this.syncState.pathToOutlineId[obsPath];
-      if (outlineId && !obsidianMap.has(obsPath)) {
-        this.logger.info(`Obsidian deleted "${obsPath}" — deleting Outline doc ${outlineId}`);
-        try {
-          await this.outlineClient.deleteDocument(outlineId);
-        } catch (e) {
-          this.logger.warn(`Delete Outline doc failed: ${e instanceof Error ? e.message : String(e)}`);
-        }
-        delete this.syncState.outlineIdMap[outlineId];
-        delete this.syncState.pathToOutlineId[obsPath];
-        delete this.syncState.fileHashes[obsPath];
-        result.deleted++;
+      if (!outlineId || obsidianMap.has(obsPath)) continue;
+
+      // Skip virtual parent docs — their .md file never exists in Obsidian
+      // but their folder does (has child notes). Deleting them would destroy children.
+      const folderPrefix = obsPath.replace(/\.md$/, '/');
+      if ([...obsidianMap.keys()].some(p => p.startsWith(folderPrefix))) continue;
+
+      this.logger.info(`Obsidian deleted "${obsPath}" — deleting Outline doc ${outlineId}`);
+      try {
+        await this.outlineClient.deleteDocument(outlineId);
+      } catch (e) {
+        this.logger.warn(`Delete Outline doc failed: ${e instanceof Error ? e.message : String(e)}`);
+        continue; // don't wipe state if delete failed
       }
+      delete this.syncState.outlineIdMap[outlineId];
+      delete this.syncState.pathToOutlineId[obsPath];
+      delete this.syncState.fileHashes[obsPath];
+      result.deleted++;
     }
 
     // ── Deletions: Outline → Obsidian ──────────────────────────────────────
     for (const outlineId of knownIds) {
       const obsPath = this.syncState.outlineIdMap[outlineId];
-      if (obsPath && !outlineIdSet.has(outlineId)) {
-        this.logger.info(`Outline deleted doc ${outlineId} — deleting Obsidian file "${obsPath}"`);
-        try {
-          await this.obsidianReader.deleteNote(obsPath);
-        } catch (e) {
-          this.logger.warn(`Delete Obsidian file failed: ${e instanceof Error ? e.message : String(e)}`);
-        }
+      if (!obsPath || outlineIdSet.has(outlineId)) continue;
+
+      // Skip virtual parent paths — they have no real Obsidian file to delete
+      const folderPrefix = obsPath.replace(/\.md$/, '/');
+      if ([...obsidianMap.keys()].some(p => p.startsWith(folderPrefix))) {
         delete this.syncState.outlineIdMap[outlineId];
         delete this.syncState.pathToOutlineId[obsPath];
-        delete this.syncState.fileHashes[obsPath];
-        result.deleted++;
+        continue;
       }
+
+      this.logger.info(`Outline deleted doc ${outlineId} — deleting Obsidian file "${obsPath}"`);
+      try {
+        await this.obsidianReader.deleteNote(obsPath);
+      } catch (e) {
+        this.logger.warn(`Delete Obsidian file failed: ${e instanceof Error ? e.message : String(e)}`);
+        continue; // don't wipe state if delete failed
+      }
+      delete this.syncState.outlineIdMap[outlineId];
+      delete this.syncState.pathToOutlineId[obsPath];
+      delete this.syncState.fileHashes[obsPath];
+      result.deleted++;
     }
 
     return result;

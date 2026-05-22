@@ -3036,37 +3036,48 @@ var SyncEngine = class {
     }
     for (const obsPath of knownPaths) {
       const outlineId = state.pathToOutlineId[obsPath];
-      if (outlineId && !obsidianMap.has(obsPath)) {
-        onProgress == null ? void 0 : onProgress(`Obsidian deleted "${obsPath}" \u2014 removing from Outline`);
-        try {
-          await this.client.deleteDocument(outlineId);
-        } catch (e) {
-          result.errors.push(`Delete Outline doc failed for "${obsPath}": ${String(e)}`);
-        }
-        delete state.outlineIdMap[outlineId];
-        delete state.pathToOutlineId[obsPath];
-        delete state.fileHashes[obsPath];
-        result.deleted++;
+      if (!outlineId || obsidianMap.has(obsPath))
+        continue;
+      const folderPrefix = obsPath.replace(/\.md$/, "/");
+      if ([...obsidianMap.keys()].some((p) => p.startsWith(folderPrefix)))
+        continue;
+      onProgress == null ? void 0 : onProgress(`Obsidian deleted "${obsPath}" \u2014 removing from Outline`);
+      try {
+        await this.client.deleteDocument(outlineId);
+      } catch (e) {
+        result.errors.push(`Delete Outline doc failed for "${obsPath}": ${String(e)}`);
+        continue;
       }
+      delete state.outlineIdMap[outlineId];
+      delete state.pathToOutlineId[obsPath];
+      delete state.fileHashes[obsPath];
+      result.deleted++;
     }
     for (const outlineId of knownIds) {
       const obsPath = state.outlineIdMap[outlineId];
-      if (obsPath && !outlineIdSet.has(outlineId)) {
-        onProgress == null ? void 0 : onProgress(`Outline deleted doc \u2014 removing Obsidian file "${obsPath}"`);
-        try {
-          const file = this.app.vault.getAbstractFileByPath(obsPath);
-          if (file instanceof import_obsidian2.TFile) {
-            await this.app.vault.delete(file);
-            await this.pruneEmptyFolders(obsPath);
-          }
-        } catch (e) {
-          result.errors.push(`Delete Obsidian file failed for "${obsPath}": ${String(e)}`);
-        }
+      if (!obsPath || outlineIdSet.has(outlineId))
+        continue;
+      const folderPrefix = obsPath.replace(/\.md$/, "/");
+      if ([...obsidianMap.keys()].some((p) => p.startsWith(folderPrefix))) {
         delete state.outlineIdMap[outlineId];
         delete state.pathToOutlineId[obsPath];
-        delete state.fileHashes[obsPath];
-        result.deleted++;
+        continue;
       }
+      onProgress == null ? void 0 : onProgress(`Outline deleted doc \u2014 removing Obsidian file "${obsPath}"`);
+      try {
+        const file = this.app.vault.getAbstractFileByPath(obsPath);
+        if (file instanceof import_obsidian2.TFile) {
+          await this.app.vault.delete(file);
+          await this.pruneEmptyFolders(obsPath);
+        }
+      } catch (e) {
+        result.errors.push(`Delete Obsidian file failed for "${obsPath}": ${String(e)}`);
+        continue;
+      }
+      delete state.outlineIdMap[outlineId];
+      delete state.pathToOutlineId[obsPath];
+      delete state.fileHashes[obsPath];
+      result.deleted++;
     }
     state.lastSyncTime = Date.now();
     state.firstSyncDone = true;

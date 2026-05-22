@@ -162,7 +162,7 @@ export class SyncEngine {
     const knownIds = Object.keys(this.syncState.outlineIdMap);
 
     // Ensure virtual parent docs exist for pure-folder hierarchies before main loop
-    await this.ensureParentDocsForFolders(obsidianNotes, collectionIdByName, outlineDocByKey);
+    await this.ensureParentDocsForFolders(obsidianNotes, collectionIdByName, outlineDocByKey, outlineIdSet);
 
     // ── Obsidian → Outline ──────────────────────────────────────────────────
     // Sort by path depth so parent flat-files are processed before their children
@@ -444,7 +444,8 @@ export class SyncEngine {
   private async ensureParentDocsForFolders(
     notes: ObsidianNote[],
     collectionIdByName: Map<string, string>,
-    outlineDocByKey: Map<string, OutlineDocument>
+    outlineDocByKey: Map<string, OutlineDocument>,
+    outlineIdSet: Set<string>,
   ): Promise<void> {
     const notePaths = new Set(notes.map(n => n.path));
     const folderPaths = new Set<string>();
@@ -464,6 +465,14 @@ export class SyncEngine {
       const flatFilePath = `${folderPath}.md`;
       if (notePaths.has(flatFilePath)) continue;
       if (this.syncState.pathToOutlineId[flatFilePath]) continue;
+
+      // Don't recreate a virtual parent if all notes in this folder already have valid
+      // Outline IDs — parent was deleted from Outline but children were only orphaned.
+      const folderNotes = notes.filter(n => n.path.startsWith(folderPath + '/'));
+      if (folderNotes.length > 0 && folderNotes.every(n => {
+        const id = this.syncState.pathToOutlineId[n.path];
+        return id !== undefined && outlineIdSet.has(id);
+      })) continue;
 
       const { collectionId, parentDocumentId } = this.extractCollectionAndParentFromPath(
         flatFilePath, collectionIdByName

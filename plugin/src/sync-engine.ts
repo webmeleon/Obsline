@@ -128,7 +128,7 @@ export class SyncEngine {
 
     if (!firstSync || dir === 'obsidian-to-outline' || dir === 'bidirectional') {
       // Ensure virtual parent docs exist for pure-folder hierarchies before main loop
-      await this.ensureParentDocsForFolders(vaultNotes, collectionIdByName, outlineDocByKey, state);
+      await this.ensureParentDocsForFolders(vaultNotes, collectionIdByName, outlineDocByKey, state, outlineIdSet);
 
       // Sort by depth so parent flat-files are processed before their children
       const sortedNotes = [...vaultNotes].sort(
@@ -373,6 +373,7 @@ export class SyncEngine {
     collectionIdByName: Map<string, string>,
     outlineDocByKey: Map<string, OutlineDocument>,
     state: SyncState,
+    outlineIdSet: Set<string>,
   ): Promise<void> {
     const notePaths = new Set(notes.map(n => n.path));
     const folderPaths = new Set<string>();
@@ -392,6 +393,14 @@ export class SyncEngine {
       const flatFilePath = `${folderPath}.md`;
       if (notePaths.has(flatFilePath)) continue;
       if (state.pathToOutlineId[flatFilePath]) continue;
+
+      // Don't recreate a virtual parent if all notes in this folder already have valid
+      // Outline IDs — parent was deleted from Outline but children were only orphaned.
+      const folderNotes = notes.filter(n => n.path.startsWith(folderPath + '/'));
+      if (folderNotes.length > 0 && folderNotes.every(n => {
+        const id = state.pathToOutlineId[n.path];
+        return id !== undefined && outlineIdSet.has(id);
+      })) continue;
 
       const { collectionId, parentDocumentId } = this.collectionFromPath(
         flatFilePath, collectionIdByName, state,

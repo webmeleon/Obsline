@@ -2941,7 +2941,7 @@ var SyncEngine = class {
     const firstSync = !state.firstSyncDone;
     const dir = this.settings.initialSyncDirection;
     if (!firstSync || dir === "obsidian-to-outline" || dir === "bidirectional") {
-      await this.ensureParentDocsForFolders(vaultNotes, collectionIdByName, outlineDocByKey, state);
+      await this.ensureParentDocsForFolders(vaultNotes, collectionIdByName, outlineDocByKey, state, outlineIdSet);
       const sortedNotes = [...vaultNotes].sort(
         (a, b) => a.path.split("/").length - b.path.split("/").length
       );
@@ -3141,7 +3141,7 @@ var SyncEngine = class {
     state.firstSyncDone = true;
     return result;
   }
-  async ensureParentDocsForFolders(notes, collectionIdByName, outlineDocByKey, state) {
+  async ensureParentDocsForFolders(notes, collectionIdByName, outlineDocByKey, state, outlineIdSet) {
     const notePaths = new Set(notes.map((n) => n.path));
     const folderPaths = /* @__PURE__ */ new Set();
     for (const note of notes) {
@@ -3158,6 +3158,12 @@ var SyncEngine = class {
       if (notePaths.has(flatFilePath))
         continue;
       if (state.pathToOutlineId[flatFilePath])
+        continue;
+      const folderNotes = notes.filter((n) => n.path.startsWith(folderPath + "/"));
+      if (folderNotes.length > 0 && folderNotes.every((n) => {
+        const id = state.pathToOutlineId[n.path];
+        return id !== void 0 && outlineIdSet.has(id);
+      }))
         continue;
       const { collectionId, parentDocumentId } = this.collectionFromPath(
         flatFilePath,

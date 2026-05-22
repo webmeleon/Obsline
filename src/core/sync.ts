@@ -152,6 +152,9 @@ export class SyncEngine {
     const knownPaths = Object.keys(this.syncState.pathToOutlineId);
     const knownIds = Object.keys(this.syncState.outlineIdMap);
 
+    // Ensure virtual parent docs exist for pure-folder hierarchies before main loop
+    await this.ensureParentDocsForFolders(obsidianNotes, collectionIdByName, outlineDocByKey);
+
     // ── Obsidian → Outline ──────────────────────────────────────────────────
     // Sort by path depth so parent flat-files are processed before their children
     const sortedNotes = [...obsidianNotes].sort(
@@ -354,6 +357,59 @@ export class SyncEngine {
     }
 
     return { collectionId, parentDocumentId: parentDocId };
+  }
+
+  /**
+   * For every pure-folder path in the vault (a folder with no matching flat .md file),
+   * create a virtual parent document in Outline so nested notes can be placed under it.
+   * Processes shallowest folders first so multi-level nesting chains correctly.
+   */
+  private async ensureParentDocsForFolders(
+    notes: ObsidianNote[],
+    collectionIdByName: Map<string, string>,
+    outlineDocByKey: Map<string, OutlineDocument>
+  ): Promise<void> {
+    const notePaths = new Set(notes.map(n => n.path));
+    const folderPaths = new Set<string>();
+
+    for (const note of notes) {
+      const parts = note.path.split('/');
+      for (let i = 2; i < parts.length; i++) {
+        folderPaths.add(parts.slice(0, i).join('/'));
+      }
+    }
+
+    const sorted = [...folderPaths].sort(
+      (a, b) => a.split('/').length - b.split('/').length
+    );
+
+    for (const folderPath of sorted) {
+      const flatFilePath = `${folderPath}.md`;
+      if (notePaths.has(flatFilePath)) continue;
+      if (this.syncState.pathToOutlineId[flatFilePath]) continue;
+
+      const { collectionId, parentDocumentId } = this.extractCollectionAndParentFromPath(
+        flatFilePath, collectionIdByName
+      );
+      if (!collectionId) continue;
+
+      const folderTitle = folderPath.split('/').pop()!;
+      const adoptKey = `${collectionId}::${folderTitle}`;
+      const existing = outlineDocByKey.get(adoptKey);
+
+      if (existing && !this.syncState.outlineIdMap[existing.id]) {
+        this.logger.info(`Adopting existing Outline doc as virtual parent for "${folderPath}"`);
+        this.syncState.outlineIdMap[existing.id] = flatFilePath;
+        this.syncState.pathToOutlineId[flatFilePath] = existing.id;
+      } else if (!existing) {
+        this.logger.info(`Creating virtual parent doc for folder: "${folderPath}"`);
+        const created = await this.outlineClient.createDocument(
+          folderTitle, '', collectionId, parentDocumentId
+        );
+        this.syncState.outlineIdMap[created.id] = flatFilePath;
+        this.syncState.pathToOutlineId[flatFilePath] = created.id;
+      }
+    }
   }
 
   private resolveConflict(note: ObsidianNote, outlineDoc: OutlineDocument): ObsidianNote {

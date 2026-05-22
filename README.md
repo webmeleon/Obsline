@@ -15,7 +15,7 @@ Bi-directional sync between [Obsidian](https://obsidian.md) and a self-hosted [O
 - **Initial sync direction** — choose which side is authoritative on the very first sync
 - **Auto-update** — plugin checks for new releases on load and offers one-click in-place update
 - **Danger zone** — reset local sync state or wipe all Outline data for a clean first sync
-- **Cross-platform** — Windows, Mac, Linux
+- **Cross-platform** — Windows, Mac, Linux, iOS, Android (Obsidian mobile app)
 
 ---
 

@@ -2742,12 +2742,16 @@ var DEFAULT_SETTINGS = {
   initialSyncDirection: "bidirectional",
   inboxCollection: "Inbox",
   ignorePaths: [".obsidian", ".trash", ".DS_Store", "Templates"],
+  attachmentFolder: "attachments",
+  syncAttachments: true,
+  cleanupOrphanAttachments: false,
   syncState: {
     lastSyncTime: 0,
     fileHashes: {},
     outlineIdMap: {},
     pathToOutlineId: {},
     outlineUpdatedAt: {},
+    attachments: { idToPath: {}, pathToId: {}, binHashes: {} },
     firstSyncDone: false
   }
 };
@@ -2863,11 +2867,234 @@ var OutlineClient = class {
   async deleteDocument(id) {
     await this.post("/documents.delete", { id });
   }
+  /**
+   * Download an attachment's binary content. `attachments.redirect` 302s to the real
+   * file; Electron's net (under requestUrl) follows the redirect automatically. S3
+   * presigned URLs authenticate via query signature, so a stray Authorization header
+   * is ignored; for local storage the hop stays same-host where the header is needed.
+   */
+  async downloadAttachment(id) {
+    var _a;
+    const response = await (0, import_obsidian.requestUrl)({
+      url: `${this.apiBase}/attachments.redirect?id=${encodeURIComponent(id)}`,
+      method: "GET",
+      headers: { "Authorization": `Bearer ${this.token}` },
+      throw: false
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`Outline attachment download error ${response.status} for ${id}`);
+    }
+    return {
+      data: response.arrayBuffer,
+      contentType: (_a = response.headers) == null ? void 0 : _a["content-type"]
+    };
+  }
+  /** Step 1 of upload: reserve an attachment + get the presigned upload target. */
+  async createAttachment(name, contentType, size, documentId) {
+    const body = { name, contentType, size };
+    if (documentId)
+      body.documentId = documentId;
+    const res = await this.post("/attachments.create", body);
+    return res.data;
+  }
+  /**
+   * Step 2 of upload: multipart POST the file to the presigned `uploadUrl`. iOS/Android
+   * have no reliable FormData/Blob, so the multipart body is assembled by hand as an
+   * ArrayBuffer. Form fields precede the `file` field. No Outline auth on presigned S3.
+   */
+  async uploadAttachment(uploadUrl, form, data, contentType, fileName) {
+    const boundary = "----ObslineBoundary" + Math.random().toString(16).slice(2) + Date.now().toString(16);
+    const enc = new TextEncoder();
+    const chunks = [];
+    for (const [k, v] of Object.entries(form)) {
+      chunks.push(enc.encode(`--${boundary}\r
+Content-Disposition: form-data; name="${k}"\r
+\r
+${v}\r
+`));
+    }
+    chunks.push(enc.encode(
+      `--${boundary}\r
+Content-Disposition: form-data; name="file"; filename="${fileName}"\r
+Content-Type: ${contentType}\r
+\r
+`
+    ));
+    chunks.push(new Uint8Array(data));
+    chunks.push(enc.encode(`\r
+--${boundary}--\r
+`));
+    const total = chunks.reduce((n, c) => n + c.byteLength, 0);
+    const body = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      body.set(c, off);
+      off += c.byteLength;
+    }
+    const isAbsolute = /^https?:\/\//i.test(uploadUrl);
+    const url = isAbsolute ? uploadUrl : `${this.apiBase.replace(/\/api$/, "")}${uploadUrl}`;
+    const headers = { "Content-Type": `multipart/form-data; boundary=${boundary}` };
+    if (!isAbsolute)
+      headers["Authorization"] = `Bearer ${this.token}`;
+    const res = await (0, import_obsidian.requestUrl)({ url, method: "POST", headers, body: body.buffer, throw: false });
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(`Outline attachment upload error ${res.status} for "${fileName}"`);
+    }
+  }
+  async deleteAttachment(id) {
+    await this.post("/attachments.delete", { id });
+  }
 };
 
+// src/embeds.ts
+var WIKILINK_EMBED = /!\[\[([^\]]+)\]\]/g;
+var MARKDOWN_EMBED = /!\[([^\]]*)\]\(\s*(<[^>]*>|[^)\s]+)(?:\s+"[^"]*")?\s*\)/g;
+function normalizeTarget(raw) {
+  let t = raw.trim();
+  if (t.startsWith("<") && t.endsWith(">"))
+    t = t.slice(1, -1);
+  try {
+    t = decodeURIComponent(t);
+  } catch (e) {
+  }
+  if (t.startsWith("./"))
+    t = t.slice(2);
+  return t;
+}
+function parseOutlineAttachmentId(target) {
+  const m = target.match(/attachments\.redirect\?(?:[^#\s]*&)?id=([^&#\s]+)/);
+  return m ? m[1] : void 0;
+}
+function fileExtension(target) {
+  var _a;
+  const base = target.split(/[?#]/)[0];
+  const name = (_a = base.split("/").pop()) != null ? _a : "";
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+function isExternalUrl(target) {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(target) || target.startsWith("//");
+}
+function classifyTarget(target) {
+  const id = parseOutlineAttachmentId(target);
+  if (id)
+    return { type: "outline", id };
+  if (isExternalUrl(target))
+    return { type: "ignore" };
+  const ext = fileExtension(target);
+  if (ext === "" || ext === "md")
+    return { type: "ignore" };
+  return { type: "local", path: target };
+}
+function parseEmbeds(body) {
+  const matches = [];
+  for (const m of body.matchAll(WIKILINK_EMBED)) {
+    const inner = m[1];
+    const bar = inner.indexOf("|");
+    const targetRaw = bar >= 0 ? inner.slice(0, bar) : inner;
+    const alias = bar >= 0 ? inner.slice(bar + 1) : "";
+    matches.push({
+      raw: m[0],
+      start: m.index,
+      end: m.index + m[0].length,
+      kind: "wikilink",
+      target: normalizeTarget(targetRaw),
+      alias
+    });
+  }
+  for (const m of body.matchAll(MARKDOWN_EMBED)) {
+    matches.push({
+      raw: m[0],
+      start: m.index,
+      end: m.index + m[0].length,
+      kind: "markdown",
+      target: normalizeTarget(m[2]),
+      alias: m[1]
+    });
+  }
+  matches.sort((a, b) => a.start - b.start);
+  const out = [];
+  let cursor = -1;
+  for (const m of matches) {
+    if (m.start >= cursor) {
+      out.push(m);
+      cursor = m.end;
+    }
+  }
+  return out;
+}
+function replaceEmbeds(body, fn) {
+  const embeds = parseEmbeds(body);
+  if (embeds.length === 0)
+    return body;
+  let out = "";
+  let last = 0;
+  for (const e of embeds) {
+    out += body.slice(last, e.start) + fn(e);
+    last = e.end;
+  }
+  return out + body.slice(last);
+}
+async function replaceEmbedsAsync(body, fn) {
+  const embeds = parseEmbeds(body);
+  if (embeds.length === 0)
+    return body;
+  let out = "";
+  let last = 0;
+  for (const e of embeds) {
+    out += body.slice(last, e.start) + await fn(e);
+    last = e.end;
+  }
+  return out + body.slice(last);
+}
+function canonicalizeBody(body, resolveId) {
+  return replaceEmbeds(body, (m) => {
+    const t = classifyTarget(m.target);
+    if (t.type === "ignore")
+      return m.raw;
+    const key = resolveId(m, t);
+    return key !== void 0 ? `\u27E6att:${key}\u27E7` : m.raw;
+  });
+}
+
 // src/sync-engine.ts
+var CONTENT_TYPE_EXT = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/svg+xml": "svg",
+  "image/bmp": "bmp",
+  "image/avif": "avif",
+  "image/heic": "heic",
+  "application/pdf": "pdf",
+  "text/plain": "txt",
+  "application/zip": "zip",
+  "audio/mpeg": "mp3",
+  "video/mp4": "mp4"
+};
+function extFromContentType(contentType) {
+  var _a;
+  if (!contentType)
+    return "bin";
+  const ct = contentType.split(";")[0].trim().toLowerCase();
+  return (_a = CONTENT_TYPE_EXT[ct]) != null ? _a : ct.includes("/") ? ct.split("/")[1].replace(/[^a-z0-9]/g, "") || "bin" : "bin";
+}
+var EXT_CONTENT_TYPE = Object.fromEntries(
+  Object.entries(CONTENT_TYPE_EXT).map(([ct, ext]) => [ext, ct])
+);
+EXT_CONTENT_TYPE.jpeg = "image/jpeg";
+function contentTypeFromExt(fileName) {
+  var _a;
+  const dot = fileName.lastIndexOf(".");
+  const ext = dot > 0 ? fileName.slice(dot + 1).toLowerCase() : "";
+  return (_a = EXT_CONTENT_TYPE[ext]) != null ? _a : "application/octet-stream";
+}
 var SyncEngine = class {
   constructor(app, settings) {
+    // Vault file index (all file types) for resolving attachment embeds; rebuilt each sync.
+    this.vaultFileSet = /* @__PURE__ */ new Set();
+    this.vaultByBasename = /* @__PURE__ */ new Map();
     this.app = app;
     this.settings = settings;
     this.client = new OutlineClient(settings.outlineUrl, settings.outlineApiToken);
@@ -2902,6 +3129,7 @@ var SyncEngine = class {
     const state = this.settings.syncState;
     onProgress == null ? void 0 : onProgress("Reading vault\u2026");
     const vaultNotes = await this.readVault();
+    this.buildVaultFileIndex();
     onProgress == null ? void 0 : onProgress("Fetching Outline data\u2026");
     const [collections, outlineDocsList] = await Promise.all([
       this.client.listCollections(),
@@ -2989,7 +3217,8 @@ var SyncEngine = class {
           if (renamedFromId && renamedFromPath && renamedFromPath !== note.path) {
             onProgress == null ? void 0 : onProgress(`Rename: "${renamedFromPath}" \u2192 "${note.path}"`);
             try {
-              const renamed = await this.client.updateDocument(renamedFromId, note.content, note.title);
+              const renameBody = await this.toOutlineBody(note.content, note.path, renamedFromId);
+              const renamed = await this.client.updateDocument(renamedFromId, renameBody, note.title);
               state.outlineIdMap[renamedFromId] = note.path;
               state.pathToOutlineId[note.path] = renamedFromId;
               delete state.pathToOutlineId[renamedFromPath];
@@ -3028,15 +3257,17 @@ var SyncEngine = class {
               }
               state.outlineIdMap[existing.id] = note.path;
               state.pathToOutlineId[note.path] = existing.id;
-              if (existing.text !== "" && this.hash(note.content) !== this.hash(existing.text)) {
+              if (existing.text !== "" && this.hash(this.canonicalize(note.content, note.path)) !== this.hash(this.canonicalize(existing.text, note.path))) {
                 try {
                   if (this.resolveConflict(note, existing) === "obsidian") {
-                    const upd = await this.client.updateDocument(existing.id, note.content, note.title);
+                    const pushBody = await this.toOutlineBody(note.content, note.path, existing.id);
+                    const upd = await this.client.updateDocument(existing.id, pushBody, note.title);
                     freshUpdatedAt.set(existing.id, upd.updatedAt);
                     docById.set(upd.id, upd);
                   } else {
-                    await this.writeNote(note.path, existing.text);
-                    localContent = existing.text;
+                    const body = await this.toObsidianBody(existing.text);
+                    await this.writeNote(note.path, body);
+                    localContent = body;
                   }
                   result.updated++;
                 } catch (e) {
@@ -3046,7 +3277,8 @@ var SyncEngine = class {
             } else {
               onProgress == null ? void 0 : onProgress(`Creating in Outline: ${note.path}`);
               try {
-                const created = await this.client.createDocument(note.title, note.content, collectionId, parentDocumentId);
+                const createBody = await this.toOutlineBody(note.content, note.path);
+                const created = await this.client.createDocument(note.title, createBody, collectionId, parentDocumentId);
                 state.outlineIdMap[created.id] = note.path;
                 state.pathToOutlineId[note.path] = created.id;
                 freshUpdatedAt.set(created.id, created.updatedAt);
@@ -3061,21 +3293,24 @@ var SyncEngine = class {
           const noteHash = this.hash(note.content);
           let contentUpdated = false;
           if (outlineDoc.text !== "") {
-            const docHash = this.hash(outlineDoc.text);
+            const localCanon = this.hash(this.canonicalize(note.content, note.path));
+            const outlineCanon = this.hash(this.canonicalize(outlineDoc.text, note.path));
             const titleChanged = note.title !== outlineDoc.title;
-            const localUnchanged = state.fileHashes[note.path] === noteHash;
-            const outlineOnlyRename = titleChanged && noteHash === docHash && localUnchanged;
-            if (!outlineOnlyRename && (noteHash !== docHash || titleChanged)) {
+            const localUnchanged = state.fileHashes[note.path] === noteHash && !await this.attachmentsChanged(note);
+            const outlineOnlyRename = titleChanged && localCanon === outlineCanon && localUnchanged;
+            if (!outlineOnlyRename && (localCanon !== outlineCanon || titleChanged)) {
               const winner = this.resolveConflict(note, outlineDoc);
               onProgress == null ? void 0 : onProgress(`Updating: ${note.path}`);
               try {
                 if (winner === "obsidian") {
-                  const upd = await this.client.updateDocument(outlineDoc.id, note.content, note.title);
+                  const pushBody = await this.toOutlineBody(note.content, note.path, outlineDoc.id);
+                  const upd = await this.client.updateDocument(outlineDoc.id, pushBody, note.title);
                   freshUpdatedAt.set(outlineDoc.id, upd.updatedAt);
                   docById.set(upd.id, upd);
                 } else {
-                  await this.writeNote(note.path, outlineDoc.text);
-                  localContent = outlineDoc.text;
+                  const body = await this.toObsidianBody(outlineDoc.text);
+                  await this.writeNote(note.path, body);
+                  localContent = body;
                 }
                 result.updated++;
                 contentUpdated = true;
@@ -3085,9 +3320,11 @@ var SyncEngine = class {
             }
           } else {
             const lastKnownHash = state.fileHashes[note.path];
-            if (lastKnownHash && noteHash !== lastKnownHash) {
+            const localChanged = lastKnownHash !== void 0 && noteHash !== lastKnownHash || await this.attachmentsChanged(note);
+            if (localChanged) {
               try {
-                const upd = await this.client.updateDocument(outlineDoc.id, note.content, note.title);
+                const pushBody = await this.toOutlineBody(note.content, note.path, outlineDoc.id);
+                const upd = await this.client.updateDocument(outlineDoc.id, pushBody, note.title);
                 freshUpdatedAt.set(outlineDoc.id, upd.updatedAt);
                 docById.set(upd.id, upd);
                 result.updated++;
@@ -3158,10 +3395,11 @@ var SyncEngine = class {
         } else if (!this.noteExists(notePath)) {
           onProgress == null ? void 0 : onProgress(`Pulling from Outline: ${notePath}`);
           try {
-            await this.writeNote(notePath, doc.text);
+            const body = await this.toObsidianBody(doc.text);
+            await this.writeNote(notePath, body);
             state.outlineIdMap[doc.id] = notePath;
             state.pathToOutlineId[notePath] = doc.id;
-            state.fileHashes[notePath] = this.hash(doc.text);
+            state.fileHashes[notePath] = this.hash(body);
             pathToOutlineIds.set(notePath, [doc.id]);
             result.created++;
           } catch (e) {
@@ -3244,6 +3482,24 @@ var SyncEngine = class {
       delete state.pathToOutlineId[obsPath];
       delete state.fileHashes[obsPath];
       result.deleted++;
+    }
+    if (this.settings.syncAttachments && this.settings.cleanupOrphanAttachments) {
+      const att = state.attachments;
+      for (const [id, vaultPath] of Object.entries(att.idToPath)) {
+        const stillExists = this.vaultFileSet.has(vaultPath) || this.vaultByBasename.has(vaultPath.split("/").pop());
+        if (stillExists)
+          continue;
+        try {
+          await this.client.deleteAttachment(id);
+        } catch (e) {
+          result.errors.push(`Delete orphaned attachment ${id} failed: ${String(e)}`);
+          continue;
+        }
+        delete att.idToPath[id];
+        delete att.pathToId[vaultPath];
+        delete att.binHashes[vaultPath];
+        result.deleted++;
+      }
     }
     const rebuiltUpdatedAt = {};
     for (const id of Object.keys(state.outlineIdMap)) {
@@ -3526,6 +3782,182 @@ var SyncEngine = class {
     }
     return h.toString(16);
   }
+  // FNV-1a 32-bit over raw bytes (attachment binary hashing).
+  hashBinary(data) {
+    const bytes = new Uint8Array(data);
+    let h = 2166136261;
+    for (let i = 0; i < bytes.length; i++) {
+      h ^= bytes[i];
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h.toString(16);
+  }
+  // ── Attachment binary IO ──────────────────────────────────────────────────
+  binaryExists(p) {
+    return this.app.vault.getAbstractFileByPath(p) instanceof import_obsidian2.TFile;
+  }
+  async writeBinary(p, data) {
+    await this.ensureFolder(p);
+    const existing = this.app.vault.getAbstractFileByPath(p);
+    if (existing instanceof import_obsidian2.TFile) {
+      await this.app.vault.modifyBinary(existing, data);
+    } else {
+      await this.app.vault.createBinary(p, data);
+    }
+  }
+  async readBinary(p) {
+    const f = this.app.vault.getAbstractFileByPath(p);
+    return f instanceof import_obsidian2.TFile ? this.app.vault.readBinary(f) : void 0;
+  }
+  // ── Attachment embed transformation ───────────────────────────────────────
+  /** Rebuild the vault file index (all file types) used to resolve attachment embeds. */
+  buildVaultFileIndex() {
+    this.vaultFileSet = /* @__PURE__ */ new Set();
+    this.vaultByBasename = /* @__PURE__ */ new Map();
+    if (!this.settings.syncAttachments)
+      return;
+    for (const f of this.app.vault.getFiles()) {
+      if (this.isIgnored(f.path))
+        continue;
+      this.vaultFileSet.add(f.path);
+      const existing = this.vaultByBasename.get(f.name);
+      if (!existing || f.path.split("/").length < existing.split("/").length)
+        this.vaultByBasename.set(f.name, f.path);
+    }
+  }
+  /** Resolve an embed target to a vault-relative file path (verbatim, note-relative, then basename). */
+  resolveEmbedPath(target, sourcePath) {
+    if (this.vaultFileSet.has(target))
+      return target;
+    const slash = sourcePath.lastIndexOf("/");
+    if (slash >= 0) {
+      const joined = `${sourcePath.slice(0, slash)}/${target}`.replace(/\/+/g, "/");
+      if (this.vaultFileSet.has(joined))
+        return joined;
+    }
+    return this.vaultByBasename.get(target.split("/").pop());
+  }
+  /**
+   * Canonical form for content diffs: collapse every attachment embed to a stable
+   * `⟦att:KEY⟧` token so the Obsidian and Outline representations of the same doc
+   * hash equal (idempotency). Docs without attachments are returned unchanged.
+   */
+  canonicalize(body, sourcePath = "") {
+    const att = this.settings.syncState.attachments;
+    return canonicalizeBody(body, (_m, t) => {
+      var _a, _b;
+      if (t.type === "outline")
+        return t.id;
+      if (t.type === "local") {
+        const vp = (_a = this.resolveEmbedPath(t.path, sourcePath)) != null ? _a : t.path;
+        return (_b = att.pathToId[vp]) != null ? _b : `local:${vp}`;
+      }
+      return void 0;
+    });
+  }
+  /**
+   * Pull transform: rewrite Outline attachment URLs to local embeds, downloading each
+   * file into the attachment folder on first encounter (idempotent via the id↔path map).
+   */
+  async toObsidianBody(outlineBody) {
+    if (!this.settings.syncAttachments)
+      return outlineBody;
+    const att = this.settings.syncState.attachments;
+    return replaceEmbedsAsync(outlineBody, async (m) => {
+      const t = classifyTarget(m.target);
+      if (t.type !== "outline")
+        return m.raw;
+      let vaultPath = att.idToPath[t.id];
+      if (!vaultPath || !this.binaryExists(vaultPath)) {
+        const { data, contentType } = await this.client.downloadAttachment(t.id);
+        vaultPath = this.allocateAttachmentPath(t.id, m.alias, contentType);
+        await this.writeBinary(vaultPath, data);
+        att.idToPath[t.id] = vaultPath;
+        att.pathToId[vaultPath] = t.id;
+        att.binHashes[vaultPath] = this.hashBinary(data);
+      }
+      const enc = vaultPath.split("/").map(encodeURIComponent).join("/");
+      return `![${m.alias}](${enc})`;
+    });
+  }
+  /**
+   * Push transform: rewrite local attachment embeds to Outline attachment URLs, uploading
+   * each file on first sight or when its binary changed (id reused otherwise — idempotent).
+   */
+  async toOutlineBody(body, sourcePath, documentId) {
+    if (!this.settings.syncAttachments)
+      return body;
+    const att = this.settings.syncState.attachments;
+    return replaceEmbedsAsync(body, async (m) => {
+      const t = classifyTarget(m.target);
+      if (t.type !== "local")
+        return m.raw;
+      const vaultPath = this.resolveEmbedPath(t.path, sourcePath);
+      if (!vaultPath)
+        return m.raw;
+      const data = await this.readBinary(vaultPath);
+      if (!data)
+        return m.raw;
+      const binHash = this.hashBinary(data);
+      let id = att.pathToId[vaultPath];
+      if (!id || att.binHashes[vaultPath] !== binHash) {
+        const fileName = vaultPath.split("/").pop();
+        const ct = contentTypeFromExt(fileName);
+        const created = await this.client.createAttachment(fileName, ct, data.byteLength, documentId);
+        await this.client.uploadAttachment(created.uploadUrl, created.form, data, ct, fileName);
+        id = created.attachment.id;
+        att.pathToId[vaultPath] = id;
+        att.idToPath[id] = vaultPath;
+        att.binHashes[vaultPath] = binHash;
+      }
+      const alt = m.alias && !/^\d+(x\d+)?$/.test(m.alias) ? m.alias : "";
+      return `![${alt}](/api/attachments.redirect?id=${id})`;
+    });
+  }
+  /**
+   * Whether any attachment a note embeds has a changed binary (same embed text, new file
+   * content ⇒ re-upload). Catches edits to an already-mapped attachment file.
+   */
+  async attachmentsChanged(note) {
+    if (!this.settings.syncAttachments)
+      return false;
+    const att = this.settings.syncState.attachments;
+    for (const m of parseEmbeds(note.content)) {
+      const t = classifyTarget(m.target);
+      if (t.type !== "local")
+        continue;
+      const vaultPath = this.resolveEmbedPath(t.path, note.path);
+      if (!vaultPath || att.pathToId[vaultPath] === void 0)
+        continue;
+      const data = await this.readBinary(vaultPath);
+      if (data && this.hashBinary(data) !== att.binHashes[vaultPath])
+        return true;
+    }
+    return false;
+  }
+  /** Pick a collision-free vault path for a pulled attachment (reuses the mapped path on re-pull). */
+  allocateAttachmentPath(id, alias, contentType) {
+    const folder = (this.settings.attachmentFolder || "attachments").replace(/\/+$/, "");
+    const { base, ext } = this.attachmentNameParts(id, alias, contentType);
+    const att = this.settings.syncState.attachments;
+    for (let i = 0; ; i++) {
+      const name = i === 0 ? `${base}.${ext}` : `${base}-${i}.${ext}`;
+      const candidate = folder ? `${folder}/${name}` : name;
+      const mapped = att.pathToId[candidate];
+      if (mapped === id)
+        return candidate;
+      if (!mapped && !this.binaryExists(candidate))
+        return candidate;
+    }
+  }
+  attachmentNameParts(id, alias, contentType) {
+    if (alias && /\.[a-z0-9]{1,8}$/i.test(alias)) {
+      const safe = alias.replace(/[/\\:*?"<>|]/g, "-").trim();
+      const dot = safe.lastIndexOf(".");
+      return { base: safe.slice(0, dot) || `attachment-${id.slice(0, 8)}`, ext: safe.slice(dot + 1).toLowerCase() };
+    }
+    return { base: `attachment-${id.slice(0, 8)}`, ext: extFromContentType(contentType) };
+  }
 };
 
 // src/settings.ts
@@ -3600,6 +4032,29 @@ var ObslineSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    containerEl.createEl("h3", { text: "Attachments" });
+    containerEl.createEl("p", {
+      text: "Sync embedded images and files in both directions. Embeds are rewritten between Obsidian syntax and Outline attachment URLs; downloaded files land in the folder below.",
+      cls: "setting-item-description"
+    });
+    new import_obsidian3.Setting(containerEl).setName("Sync attachments").setDesc("Upload local embeds to Outline and download Outline attachments into the vault.").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.syncAttachments).onChange(async (value) => {
+        this.plugin.settings.syncAttachments = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Attachment folder").setDesc("Vault-relative folder where attachments pulled from Outline are stored.").addText(
+      (text) => text.setPlaceholder("attachments").setValue(this.plugin.settings.attachmentFolder).onChange(async (value) => {
+        this.plugin.settings.attachmentFolder = value.trim().replace(/\/+$/, "") || "attachments";
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Clean up orphaned attachments").setDesc("When enabled, delete attachments in Outline that no synced document references anymore. Off by default \u2014 deletions are irreversible.").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.cleanupOrphanAttachments).onChange(async (value) => {
+        this.plugin.settings.cleanupOrphanAttachments = value;
+        await this.plugin.saveSettings();
+      })
+    );
     containerEl.createEl("h3", { text: "Initial sync" });
     const firstDone = this.plugin.settings.syncState.firstSyncDone;
     new import_obsidian3.Setting(containerEl).setName("First-sync direction").setDesc(
@@ -3630,6 +4085,7 @@ var ObslineSettingTab = class extends import_obsidian3.PluginSettingTab {
           outlineIdMap: {},
           pathToOutlineId: {},
           outlineUpdatedAt: {},
+          attachments: { idToPath: {}, pathToId: {}, binHashes: {} },
           firstSyncDone: false
         };
         await this.plugin.saveSettings();
@@ -3658,6 +4114,7 @@ var ObslineSettingTab = class extends import_obsidian3.PluginSettingTab {
           outlineIdMap: {},
           pathToOutlineId: {},
           outlineUpdatedAt: {},
+          attachments: { idToPath: {}, pathToId: {}, binHashes: {} },
           firstSyncDone: false
         };
         await this.plugin.saveSettings();

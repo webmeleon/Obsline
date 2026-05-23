@@ -41,6 +41,9 @@ describe('Config', () => {
       syncInterval: 600,
       conflictResolution: 'obsidian-wins',
       ignorePaths: ['.obsidian', '.trash', 'temp'],
+      attachmentFolder: 'attachments',
+      syncAttachments: true,
+      cleanupOrphanAttachments: false,
     };
 
     await saveConfig(testConfig);
@@ -61,6 +64,9 @@ describe('Config', () => {
       syncInterval: 300,
       conflictResolution: 'last-write-wins',
       ignorePaths: [],
+      attachmentFolder: 'attachments',
+      syncAttachments: true,
+      cleanupOrphanAttachments: false,
     };
 
     const errors = await validateConfig(validConfig);
@@ -75,6 +81,9 @@ describe('Config', () => {
       syncInterval: 300,
       conflictResolution: 'last-write-wins',
       ignorePaths: [],
+      attachmentFolder: 'attachments',
+      syncAttachments: true,
+      cleanupOrphanAttachments: false,
     };
 
     const errors = await validateConfig(invalidConfig);
@@ -90,6 +99,9 @@ describe('Config', () => {
       syncInterval: 300,
       conflictResolution: 'last-write-wins',
       ignorePaths: [],
+      attachmentFolder: 'attachments',
+      syncAttachments: true,
+      cleanupOrphanAttachments: false,
     };
 
     const errors = await validateConfig(config);
@@ -104,6 +116,9 @@ describe('Config', () => {
       syncInterval: 5,
       conflictResolution: 'last-write-wins',
       ignorePaths: [],
+      attachmentFolder: 'attachments',
+      syncAttachments: true,
+      cleanupOrphanAttachments: false,
     };
 
     const errors = await validateConfig(config);
@@ -118,6 +133,9 @@ describe('Config', () => {
       syncInterval: 600,
       conflictResolution: 'outline-wins',
       ignorePaths: ['custom'],
+      attachmentFolder: 'attachments',
+      syncAttachments: true,
+      cleanupOrphanAttachments: false,
     };
 
     await saveConfig(testConfig);

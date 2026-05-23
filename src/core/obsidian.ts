@@ -133,4 +133,72 @@ export class ObsidianReader {
     const fullPath = path.join(this.vaultPath, relativePath);
     return fs.pathExists(fullPath);
   }
+
+  // ── Binary IO (attachments) ───────────────────────────────────────────────
+
+  async readBinary(relativePath: string): Promise<Buffer> {
+    const fullPath = path.join(this.vaultPath, relativePath);
+    return fs.readFile(fullPath); // no encoding → Buffer
+  }
+
+  async writeBinary(relativePath: string, data: Buffer): Promise<void> {
+    const fullPath = path.join(this.vaultPath, relativePath);
+    await fs.ensureDir(path.dirname(fullPath));
+    await fs.writeFile(fullPath, data);
+    logger.info(`Wrote attachment: ${relativePath} (${data.byteLength} bytes)`);
+  }
+
+  /**
+   * Find a vault file by its embed target (Obsidian-style resolution, approximated):
+   * try the path verbatim, then relative to the embedding note's folder, then a
+   * vault-wide search by exact filename (shortest path wins). Returns the
+   * vault-relative path or undefined.
+   */
+  async resolveAttachment(target: string, sourcePath: string): Promise<string | undefined> {
+    const candidates: string[] = [target];
+    const srcDir = path.posix.dirname(sourcePath);
+    if (srcDir && srcDir !== '.') candidates.push(path.posix.join(srcDir, target));
+    for (const rel of candidates) {
+      if (await this.noteExists(rel)) return rel.replace(/\\/g, '/');
+    }
+    // Vault-wide fallback: match by filename, prefer the shortest path.
+    const wanted = target.split('/').pop()!;
+    const found: string[] = [];
+    await this.walkFiles(this.vaultPath, wanted, found);
+    if (found.length === 0) return undefined;
+    found.sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b));
+    return found[0];
+  }
+
+  private async walkFiles(dir: string, wantedName: string, out: string[]): Promise<void> {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      const rel = path.relative(this.vaultPath, full).replace(/\\/g, '/');
+      if (this.shouldIgnore(rel)) continue;
+      if (entry.isDirectory()) {
+        await this.walkFiles(full, wantedName, out);
+      } else if (entry.isFile() && entry.name === wantedName) {
+        out.push(rel);
+      }
+    }
+  }
+
+  /** All vault-relative file paths (any type), respecting ignore patterns. */
+  async listAllFiles(): Promise<string[]> {
+    const out: string[] = [];
+    await this.walkAll(this.vaultPath, out);
+    return out;
+  }
+
+  private async walkAll(dir: string, out: string[]): Promise<void> {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      const rel = path.relative(this.vaultPath, full).replace(/\\/g, '/');
+      if (this.shouldIgnore(rel)) continue;
+      if (entry.isDirectory()) await this.walkAll(full, out);
+      else if (entry.isFile()) out.push(rel);
+    }
+  }
 }

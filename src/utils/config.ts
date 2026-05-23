@@ -13,6 +13,12 @@ export interface ObslineConfig {
   syncInterval: number;
   conflictResolution: ConflictResolution;
   ignorePaths: string[];
+  // Vault-relative folder where attachments pulled from Outline are written.
+  attachmentFolder: string;
+  // Master toggle for the attachment/image sync feature.
+  syncAttachments: boolean;
+  // Delete Outline attachments no synced document references anymore (opt-in; irreversible).
+  cleanupOrphanAttachments: boolean;
 }
 
 
@@ -23,6 +29,9 @@ const DEFAULT_CONFIG: ObslineConfig = {
   syncInterval: 300,
   conflictResolution: 'last-write-wins',
   ignorePaths: ['.obsidian', '.trash', '.DS_Store', '*.tmp'],
+  attachmentFolder: 'attachments',
+  syncAttachments: true,
+  cleanupOrphanAttachments: false,
 };
 
 export async function loadConfig(): Promise<ObslineConfig> {

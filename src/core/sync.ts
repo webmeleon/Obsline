@@ -5,6 +5,13 @@ import { ObsidianReader, ObsidianNote } from './obsidian';
 import { OutlineClient, OutlineDocument, OutlineCollection } from './outline';
 import { ObslineConfig } from '../utils/config';
 import { Logger } from '../utils/logger';
+import { canonicalizeBody, classifyTarget, replaceEmbedsAsync, parseEmbeds } from './embeds';
+
+interface AttachmentState {
+  idToPath: Record<string, string>;  // outline attachmentId → vault-relative attachment path
+  pathToId: Record<string, string>;  // vault-relative attachment path → outline attachmentId
+  binHashes: Record<string, string>; // vault-relative attachment path → hash(binary content)
+}
 
 interface SyncState {
   lastSyncTime: number;
@@ -12,6 +19,7 @@ interface SyncState {
   outlineIdMap: Record<string, string>;   // outlineId → obsidianPath
   pathToOutlineId: Record<string, string>; // obsidianPath → outlineId
   outlineUpdatedAt: Record<string, string>; // outlineId → last-synced updatedAt (ISO); drives change detection
+  attachments: AttachmentState;            // attachment id ↔ path ↔ binary-hash mapping (idempotent embeds)
 }
 
 interface SyncResult {
@@ -20,6 +28,32 @@ interface SyncResult {
   deleted: number;
   renamed: number;
   conflicts: string[];
+}
+
+const CONTENT_TYPE_EXT: Record<string, string> = {
+  'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp',
+  'image/svg+xml': 'svg', 'image/bmp': 'bmp', 'image/avif': 'avif', 'image/heic': 'heic',
+  'application/pdf': 'pdf', 'text/plain': 'txt', 'application/zip': 'zip',
+  'audio/mpeg': 'mp3', 'video/mp4': 'mp4',
+};
+
+/** Best-effort file extension from a MIME type; falls back to 'bin'. */
+function extFromContentType(contentType?: string): string {
+  if (!contentType) return 'bin';
+  const ct = contentType.split(';')[0].trim().toLowerCase();
+  return CONTENT_TYPE_EXT[ct] ?? (ct.includes('/') ? ct.split('/')[1].replace(/[^a-z0-9]/g, '') || 'bin' : 'bin');
+}
+
+const EXT_CONTENT_TYPE: Record<string, string> = Object.fromEntries(
+  Object.entries(CONTENT_TYPE_EXT).map(([ct, ext]) => [ext, ct]),
+);
+EXT_CONTENT_TYPE.jpeg = 'image/jpeg';
+
+/** Best-effort MIME type from a filename; falls back to application/octet-stream. */
+function contentTypeFromExt(fileName: string): string {
+  const dot = fileName.lastIndexOf('.');
+  const ext = dot > 0 ? fileName.slice(dot + 1).toLowerCase() : '';
+  return EXT_CONTENT_TYPE[ext] ?? 'application/octet-stream';
 }
 
 export class SyncEngine {
@@ -33,7 +67,12 @@ export class SyncEngine {
     outlineIdMap: {},
     pathToOutlineId: {},
     outlineUpdatedAt: {},
+    attachments: { idToPath: {}, pathToId: {}, binHashes: {} },
   };
+
+  // Vault file index (all file types) for resolving attachment embeds; rebuilt each sync.
+  private vaultFileSet = new Set<string>();
+  private vaultByBasename = new Map<string, string>();
 
   constructor(config: ObslineConfig) {
     this.config = config;
@@ -53,6 +92,8 @@ export class SyncEngine {
         this.outlineClient.listDocuments(),
         this.outlineClient.listCollections(),
       ]);
+
+      await this.buildVaultFileIndex();
 
       const updatedCollections = await this.ensureCollectionsForFolders(obsidianNotes, collections, outlineDocuments);
       const result = await this.syncBidirectional(obsidianNotes, outlineDocuments, updatedCollections);
@@ -279,7 +320,8 @@ export class SyncEngine {
 
         if (renamedFromId && renamedFromPath && renamedFromPath !== note.path) {
           this.logger.info(`Rename detected: "${renamedFromPath}" → "${note.path}"`);
-          const renamed = await this.outlineClient.updateDocument(renamedFromId, note.content, note.title);
+          const renameBody = await this.toOutlineBody(note.content, note.path, renamedFromId);
+          const renamed = await this.outlineClient.updateDocument(renamedFromId, renameBody, note.title);
           this.syncState.outlineIdMap[renamedFromId] = note.path;
           this.syncState.pathToOutlineId[note.path] = renamedFromId;
           delete this.syncState.pathToOutlineId[renamedFromPath];
@@ -325,21 +367,25 @@ export class SyncEngine {
             this.syncState.pathToOutlineId[note.path] = existing.id;
             // Reconcile content: both sides may have diverged before the re-link.
             // Without this the two stay permanently out of sync on body content.
-            if (existing.text !== '' && this.hashContent(note.content) !== this.hashContent(existing.text)) {
+            if (existing.text !== '' &&
+                this.hashContent(this.canonicalize(note.content, note.path)) !== this.hashContent(this.canonicalize(existing.text, note.path))) {
               const resolvedNote = this.resolveConflict(note, existing);
               if (resolvedNote === note) {
-                const upd = await this.outlineClient.updateDocument(existing.id, note.content, note.title);
+                const pushBody = await this.toOutlineBody(note.content, note.path, existing.id);
+                const upd = await this.outlineClient.updateDocument(existing.id, pushBody, note.title);
                 freshUpdatedAt.set(existing.id, upd.updatedAt);
                 docById.set(upd.id, upd);
               } else {
-                await this.obsidianReader.writeNote(note.path, resolvedNote.content);
-                localContent = resolvedNote.content;
+                const body = await this.toObsidianBody(resolvedNote.content);
+                await this.obsidianReader.writeNote(note.path, body);
+                localContent = body;
               }
               result.updated++;
             }
           } else {
+            const createBody = await this.toOutlineBody(note.content, note.path);
             const created = await this.outlineClient.createDocument(
-              note.title, note.content, collectionId, parentDocumentId
+              note.title, createBody, collectionId, parentDocumentId
             );
             this.syncState.outlineIdMap[created.id] = note.path;
             this.syncState.pathToOutlineId[note.path] = created.id;
@@ -353,32 +399,42 @@ export class SyncEngine {
         let contentUpdated = false;
 
         if (outlineDoc.text !== '') {
-          const outlineHash = this.hashContent(outlineDoc.text);
+          // Compare over the CANONICAL form so attachment-embed representation differences
+          // (![[img.png]] vs redirect URL) don't read as content changes (idempotency).
+          const localCanon = this.hashContent(this.canonicalize(note.content, note.path));
+          const outlineCanon = this.hashContent(this.canonicalize(outlineDoc.text, note.path));
           const titleChanged = note.title !== outlineDoc.title;
           // Outline-only rename: title changed, local content matches its last-synced hash
           // (= user didn't touch the local file). Skip conflict resolution; the Outline→Obsidian
           // re-path below will move the file to the new name. Prevents pushing old title back.
-          const localUnchanged = this.syncState.fileHashes[note.path] === noteHash;
-          const outlineOnlyRename = titleChanged && noteHash === outlineHash && localUnchanged;
+          const localUnchanged = this.syncState.fileHashes[note.path] === noteHash
+            && !(await this.attachmentsChanged(note));
+          const outlineOnlyRename = titleChanged && localCanon === outlineCanon && localUnchanged;
 
-          if (!outlineOnlyRename && (noteHash !== outlineHash || titleChanged)) {
+          if (!outlineOnlyRename && (localCanon !== outlineCanon || titleChanged)) {
             const resolvedNote = this.resolveConflict(note, outlineDoc);
             if (resolvedNote === note) {
-              const upd = await this.outlineClient.updateDocument(outlineDoc.id, note.content, note.title);
+              const pushBody = await this.toOutlineBody(note.content, note.path, outlineDoc.id);
+              const upd = await this.outlineClient.updateDocument(outlineDoc.id, pushBody, note.title);
               freshUpdatedAt.set(outlineDoc.id, upd.updatedAt);
               docById.set(upd.id, upd);
             } else {
-              await this.obsidianReader.writeNote(note.path, resolvedNote.content);
-              localContent = resolvedNote.content;
+              const body = await this.toObsidianBody(resolvedNote.content);
+              await this.obsidianReader.writeNote(note.path, body);
+              localContent = body;
             }
             result.updated++;
             contentUpdated = true;
           }
         } else {
-          // Stub: Outline unchanged since last sync — push Obsidian changes if any
+          // Stub: Outline unchanged since last sync — push Obsidian changes if any.
+          // "Changed" also covers a referenced attachment whose binary content changed.
           const lastKnownHash = this.syncState.fileHashes[note.path];
-          if (lastKnownHash && noteHash !== lastKnownHash) {
-            const upd = await this.outlineClient.updateDocument(outlineDoc.id, note.content, note.title);
+          const localChanged = (lastKnownHash !== undefined && noteHash !== lastKnownHash)
+            || await this.attachmentsChanged(note);
+          if (localChanged) {
+            const pushBody = await this.toOutlineBody(note.content, note.path, outlineDoc.id);
+            const upd = await this.outlineClient.updateDocument(outlineDoc.id, pushBody, note.title);
             freshUpdatedAt.set(outlineDoc.id, upd.updatedAt);
             docById.set(upd.id, upd);
             result.updated++;
@@ -466,10 +522,11 @@ export class SyncEngine {
         this.syncState.outlineIdMap[outlineDoc.id] = notePath;
         this.syncState.pathToOutlineId[notePath] = outlineDoc.id;
       } else if (!await this.obsidianReader.noteExists(notePath)) {
-        await this.obsidianReader.writeNote(notePath, outlineDoc.text);
+        const body = await this.toObsidianBody(outlineDoc.text);
+        await this.obsidianReader.writeNote(notePath, body);
         this.syncState.outlineIdMap[outlineDoc.id] = notePath;
         this.syncState.pathToOutlineId[notePath] = outlineDoc.id;
-        this.syncState.fileHashes[notePath] = this.hashContent(outlineDoc.text);
+        this.syncState.fileHashes[notePath] = this.hashContent(body);
         pathToOutlineIds.set(notePath, [outlineDoc.id]);
         result.created++;
       } else {
@@ -560,6 +617,30 @@ export class SyncEngine {
       delete this.syncState.pathToOutlineId[obsPath];
       delete this.syncState.fileHashes[obsPath];
       result.deleted++;
+    }
+
+    // ── Orphaned attachment cleanup (opt-in) ────────────────────────────────
+    // Conservative + path-based: an attachment is "orphaned" when its local file is gone
+    // from the vault entirely (not even findable by basename). Deletions are irreversible,
+    // so this only runs when explicitly enabled.
+    if (this.config.syncAttachments && this.config.cleanupOrphanAttachments) {
+      const att = this.syncState.attachments;
+      for (const [id, vaultPath] of Object.entries(att.idToPath)) {
+        const stillExists = this.vaultFileSet.has(vaultPath)
+          || this.vaultByBasename.has(vaultPath.split('/').pop()!);
+        if (stillExists) continue;
+        this.logger.info(`Deleting orphaned attachment ${id} ("${vaultPath}")`);
+        try {
+          await this.outlineClient.deleteAttachment(id);
+        } catch (e) {
+          this.logger.warn(`Delete orphaned attachment failed: ${e instanceof Error ? e.message : String(e)}`);
+          continue;
+        }
+        delete att.idToPath[id];
+        delete att.pathToId[vaultPath];
+        delete att.binHashes[vaultPath];
+        result.deleted++;
+      }
     }
 
     // Rebuild per-doc updatedAt from the freshest values. Entries for deleted docs drop out
@@ -732,6 +813,155 @@ export class SyncEngine {
     return crypto.createHash('md5').update(content).digest('hex');
   }
 
+  private hashBinary(data: Buffer): string {
+    return crypto.createHash('md5').update(data).digest('hex');
+  }
+
+  // ── Attachment embed transformation ───────────────────────────────────────
+
+  /** Rebuild the vault file index (all file types) used to resolve attachment embeds. */
+  private async buildVaultFileIndex(): Promise<void> {
+    this.vaultFileSet = new Set();
+    this.vaultByBasename = new Map();
+    if (!this.config.syncAttachments) return;
+    for (const p of await this.obsidianReader.listAllFiles()) {
+      this.vaultFileSet.add(p);
+      const base = p.split('/').pop()!;
+      const existing = this.vaultByBasename.get(base);
+      if (!existing || p.split('/').length < existing.split('/').length) this.vaultByBasename.set(base, p);
+    }
+  }
+
+  /** Resolve an embed target to a vault-relative file path (verbatim, note-relative, then basename). */
+  private resolveEmbedPath(target: string, sourcePath: string): string | undefined {
+    if (this.vaultFileSet.has(target)) return target;
+    const slash = sourcePath.lastIndexOf('/');
+    if (slash >= 0) {
+      const joined = `${sourcePath.slice(0, slash)}/${target}`.replace(/\/+/g, '/');
+      if (this.vaultFileSet.has(joined)) return joined;
+    }
+    return this.vaultByBasename.get(target.split('/').pop()!);
+  }
+
+  /**
+   * Canonical form for content diffs: collapse every attachment embed to a stable
+   * `⟦att:KEY⟧` token so the Obsidian and Outline representations of the same doc
+   * hash equal (idempotency). Docs without attachments are returned unchanged.
+   */
+  private canonicalize(body: string, sourcePath = ''): string {
+    return canonicalizeBody(body, (_m, t) => {
+      if (t.type === 'outline') return t.id;
+      // local: resolve the embed to its vault path, then to a mapped attachment id. An
+      // as-yet-unuploaded file yields a stable local: key so it still reads as "changed".
+      if (t.type === 'local') {
+        const vp = this.resolveEmbedPath(t.path, sourcePath) ?? t.path;
+        return this.syncState.attachments.pathToId[vp] ?? `local:${vp}`;
+      }
+      return undefined;
+    });
+  }
+
+  /**
+   * Pull transform: rewrite Outline attachment URLs to local embeds, downloading each
+   * file into the attachment folder on first encounter (idempotent via the id↔path map).
+   */
+  private async toObsidianBody(outlineBody: string): Promise<string> {
+    if (!this.config.syncAttachments) return outlineBody;
+    return replaceEmbedsAsync(outlineBody, async (m) => {
+      const t = classifyTarget(m.target);
+      if (t.type !== 'outline') return m.raw; // only Outline attachments are pulled
+      const att = this.syncState.attachments;
+      let vaultPath = att.idToPath[t.id];
+      if (!vaultPath || !(await this.obsidianReader.noteExists(vaultPath))) {
+        const { data, contentType } = await this.outlineClient.downloadAttachment(t.id);
+        vaultPath = await this.allocateAttachmentPath(t.id, m.alias, contentType);
+        await this.obsidianReader.writeBinary(vaultPath, data);
+        att.idToPath[t.id] = vaultPath;
+        att.pathToId[vaultPath] = t.id;
+        att.binHashes[vaultPath] = this.hashBinary(data);
+        this.logger.info(`Pulled attachment ${t.id} → "${vaultPath}"`);
+      }
+      // Standard-markdown embed, vault-root-relative, %20-encoded; alt text preserved.
+      const enc = vaultPath.split('/').map(encodeURIComponent).join('/');
+      return `![${m.alias}](${enc})`;
+    });
+  }
+
+  /**
+   * Push transform: rewrite local attachment embeds to Outline attachment URLs, uploading
+   * each file on first sight or when its binary changed (id reused otherwise — idempotent).
+   */
+  private async toOutlineBody(body: string, sourcePath: string, documentId?: string): Promise<string> {
+    if (!this.config.syncAttachments) return body;
+    const att = this.syncState.attachments;
+    return replaceEmbedsAsync(body, async (m) => {
+      const t = classifyTarget(m.target);
+      if (t.type !== 'local') return m.raw; // outline URLs / notes / external — leave alone
+      const vaultPath = this.resolveEmbedPath(t.path, sourcePath);
+      if (!vaultPath) return m.raw; // can't find the file → leave the embed untouched
+      const data = await this.obsidianReader.readBinary(vaultPath);
+      const binHash = this.hashBinary(data);
+      let id = att.pathToId[vaultPath];
+      if (!id || att.binHashes[vaultPath] !== binHash) {
+        const fileName = vaultPath.split('/').pop()!;
+        const created = await this.outlineClient.createAttachment(
+          fileName, contentTypeFromExt(fileName), data.byteLength, documentId,
+        );
+        await this.outlineClient.uploadAttachment(
+          created.uploadUrl, created.form, data, contentTypeFromExt(fileName), fileName,
+        );
+        id = created.attachment.id;
+        att.pathToId[vaultPath] = id;
+        att.idToPath[id] = vaultPath;
+        att.binHashes[vaultPath] = binHash;
+        this.logger.info(`Uploaded attachment "${vaultPath}" → ${id}`);
+      }
+      const alt = m.alias && !/^\d+(x\d+)?$/.test(m.alias) ? m.alias : '';
+      return `![${alt}](/api/attachments.redirect?id=${id})`;
+    });
+  }
+
+  /**
+   * Whether any attachment a note embeds has a changed binary (same embed text, new file
+   * content ⇒ re-upload). Catches edits to an already-mapped attachment file.
+   */
+  private async attachmentsChanged(note: ObsidianNote): Promise<boolean> {
+    if (!this.config.syncAttachments) return false;
+    const att = this.syncState.attachments;
+    for (const m of parseEmbeds(note.content)) {
+      const t = classifyTarget(m.target);
+      if (t.type !== 'local') continue;
+      const vaultPath = this.resolveEmbedPath(t.path, note.path);
+      if (!vaultPath || att.pathToId[vaultPath] === undefined) continue;
+      const data = await this.obsidianReader.readBinary(vaultPath);
+      if (this.hashBinary(data) !== att.binHashes[vaultPath]) return true;
+    }
+    return false;
+  }
+
+  /** Pick a collision-free vault path for a pulled attachment (reuses the mapped path on re-pull). */
+  private async allocateAttachmentPath(id: string, alias: string, contentType?: string): Promise<string> {
+    const folder = (this.config.attachmentFolder || 'attachments').replace(/\/+$/, '');
+    const { base, ext } = this.attachmentNameParts(id, alias, contentType);
+    for (let i = 0; ; i++) {
+      const name = i === 0 ? `${base}.${ext}` : `${base}-${i}.${ext}`;
+      const candidate = folder ? `${folder}/${name}` : name;
+      const mapped = this.syncState.attachments.pathToId[candidate];
+      if (mapped === id) return candidate;                                   // already ours
+      if (!mapped && !(await this.obsidianReader.noteExists(candidate))) return candidate; // free
+    }
+  }
+
+  private attachmentNameParts(id: string, alias: string, contentType?: string): { base: string; ext: string } {
+    // Prefer a filename-looking alias (Outline often uses the original name as caption).
+    if (alias && /\.[a-z0-9]{1,8}$/i.test(alias)) {
+      const safe = alias.replace(/[/\\:*?"<>|]/g, '-').trim();
+      const dot = safe.lastIndexOf('.');
+      return { base: safe.slice(0, dot) || `attachment-${id.slice(0, 8)}`, ext: safe.slice(dot + 1).toLowerCase() };
+    }
+    return { base: `attachment-${id.slice(0, 8)}`, ext: extFromContentType(contentType) };
+  }
+
   private async loadSyncState(): Promise<void> {
     const stateFile = path.join(process.env.HOME || '~', '.obsline', 'sync-state.json');
     try {
@@ -746,6 +976,12 @@ export class SyncEngine {
             Object.fromEntries(Object.entries(raw.outlineIdMap ?? {}).map(([id, p]) => [p, id])),
           // Backwards-compat: older state files lack outlineUpdatedAt → empty triggers one full resync.
           outlineUpdatedAt: raw.outlineUpdatedAt ?? {},
+          // Backwards-compat: older state files lack attachments → empty maps (attachments re-discovered on next sync).
+          attachments: {
+            idToPath: raw.attachments?.idToPath ?? {},
+            pathToId: raw.attachments?.pathToId ?? {},
+            binHashes: raw.attachments?.binHashes ?? {},
+          },
         };
         this.logger.debug('Sync state loaded');
       }

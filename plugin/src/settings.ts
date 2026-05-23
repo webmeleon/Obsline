@@ -145,6 +145,54 @@ export class ObslineSettingTab extends PluginSettingTab {
           }),
       );
 
+    // ── Attachments ───────────────────────────────────────────────────────────
+
+    containerEl.createEl('h3', { text: 'Attachments' });
+
+    containerEl.createEl('p', {
+      text: 'Sync embedded images and files in both directions. Embeds are rewritten between ' +
+        'Obsidian syntax and Outline attachment URLs; downloaded files land in the folder below.',
+      cls: 'setting-item-description',
+    });
+
+    new Setting(containerEl)
+      .setName('Sync attachments')
+      .setDesc('Upload local embeds to Outline and download Outline attachments into the vault.')
+      .addToggle(toggle =>
+        toggle
+          .setValue(this.plugin.settings.syncAttachments)
+          .onChange(async value => {
+            this.plugin.settings.syncAttachments = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Attachment folder')
+      .setDesc('Vault-relative folder where attachments pulled from Outline are stored.')
+      .addText(text =>
+        text
+          .setPlaceholder('attachments')
+          .setValue(this.plugin.settings.attachmentFolder)
+          .onChange(async value => {
+            this.plugin.settings.attachmentFolder = value.trim().replace(/\/+$/, '') || 'attachments';
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Clean up orphaned attachments')
+      .setDesc('When enabled, delete attachments in Outline that no synced document references anymore. ' +
+        'Off by default — deletions are irreversible.')
+      .addToggle(toggle =>
+        toggle
+          .setValue(this.plugin.settings.cleanupOrphanAttachments)
+          .onChange(async value => {
+            this.plugin.settings.cleanupOrphanAttachments = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
     // ── Initial sync ─────────────────────────────────────────────────────────
 
     containerEl.createEl('h3', { text: 'Initial sync' });
@@ -190,7 +238,8 @@ export class ObslineSettingTab extends PluginSettingTab {
             return;
           }
           this.plugin.settings.syncState = {
-            lastSyncTime: 0, fileHashes: {}, outlineIdMap: {}, pathToOutlineId: {}, outlineUpdatedAt: {}, firstSyncDone: false,
+            lastSyncTime: 0, fileHashes: {}, outlineIdMap: {}, pathToOutlineId: {}, outlineUpdatedAt: {},
+            attachments: { idToPath: {}, pathToId: {}, binHashes: {} }, firstSyncDone: false,
           };
           await this.plugin.saveSettings();
           new Notice('Sync State zurückgesetzt. Outline-Daten sind noch online vorhanden.');
@@ -216,7 +265,8 @@ export class ObslineSettingTab extends PluginSettingTab {
           const { deleted, failed } = await this.plugin.syncEngine.deleteAllOutline();
 
           this.plugin.settings.syncState = {
-            lastSyncTime: 0, fileHashes: {}, outlineIdMap: {}, pathToOutlineId: {}, outlineUpdatedAt: {}, firstSyncDone: false,
+            lastSyncTime: 0, fileHashes: {}, outlineIdMap: {}, pathToOutlineId: {}, outlineUpdatedAt: {},
+            attachments: { idToPath: {}, pathToId: {}, binHashes: {} }, firstSyncDone: false,
           };
           await this.plugin.saveSettings();
 

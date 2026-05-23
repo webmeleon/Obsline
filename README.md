@@ -1,4 +1,4 @@
-# Obsline v0.5.13
+# Obsline v0.6.0
 
 Bi-directional sync between [Obsidian](https://obsidian.md) and a self-hosted [Outline](https://www.getoutline.com/) instance.
 
@@ -8,6 +8,7 @@ Bi-directional sync between [Obsidian](https://obsidian.md) and a self-hosted [O
 - **CLI Tool** — optional command-line interface for scripting and headless use
 - **Nested documents** — Outline sub-notes map to subfolders in Obsidian (coexistence pattern)
 - **Collection → Folder mapping** — Outline collections appear as top-level folders in Obsidian
+- **Attachments & images** — embedded images and files sync both ways; embed syntax is rewritten between Obsidian and Outline, downloads land in a configurable folder
 - **Inbox collection** — root-level vault notes sync to a configurable Inbox collection
 - **Rename detection** — content-hash based rename tracking (no duplicates)
 - **Auto-collection creation** — new Obsidian folders automatically create Outline collections
@@ -25,7 +26,7 @@ Bi-directional sync between [Obsidian](https://obsidian.md) and a self-hosted [O
 
 **Option A — Download release (no build required)**
 
-1. Download `obsline-v0.5.13.zip` from the [latest release](https://github.com/webmeleon/Obsline/releases/latest)
+1. Download `obsline-v0.6.0.zip` from the [latest release](https://github.com/webmeleon/Obsline/releases/latest)
 2. Unzip and run the install script:
 
    ```bash

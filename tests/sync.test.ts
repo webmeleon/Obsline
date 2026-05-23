@@ -20,13 +20,36 @@ const mockOutlineClient = OutlineClient as jest.MockedClass<typeof OutlineClient
 function makeOutlineStore(seedNormalize = false) {
   const store = new Map<string, OutlineDocument>();
   const collections = new Map<string, OutlineCollection>();
+  const attachments = new Map<string, { id: string; data: Buffer; contentType: string }>();
   let clock = 1000;
   let seq = 0;
+  let attSeq = 0;
   const nextTs = () => new Date(clock++ * 1000).toISOString();
   // Optional: simulate Outline normalising body content on write (trailing newline).
   const norm = (t: string) => (seedNormalize && t ? `${t}\n` : t);
 
   const client = {
+    downloadAttachment: jest.fn(async (id: string) => {
+      const a = attachments.get(id);
+      if (!a) throw new Error(`no attachment ${id}`);
+      return { data: a.data, contentType: a.contentType };
+    }),
+    createAttachment: jest.fn(async (name: string, contentType: string, _size: number, _documentId?: string) => {
+      const id = `att-${++attSeq}`;
+      attachments.set(id, { id, data: Buffer.alloc(0), contentType });
+      return {
+        uploadUrl: `https://s3.example.com/upload/${id}`,
+        form: { key: id },
+        attachment: { id, url: `/api/attachments.redirect?id=${id}`, name, contentType },
+      };
+    }),
+    uploadAttachment: jest.fn(async (uploadUrl: string, _form: any, data: Buffer, contentType: string, _fileName: string) => {
+      const id = uploadUrl.split('/').pop()!;
+      const rec = attachments.get(id)!;
+      rec.data = Buffer.isBuffer(data) ? data : Buffer.from(data as any);
+      rec.contentType = contentType;
+    }),
+    deleteAttachment: jest.fn(async (id: string) => { attachments.delete(id); }),
     listDocuments: jest.fn(async () => [...store.values()].map(d => ({ ...d, text: '' }))),
     listCollections: jest.fn(async () => [...collections.values()]),
     getDocument: jest.fn(async (id: string) => ({ ...store.get(id)! })),
@@ -67,11 +90,12 @@ function makeOutlineStore(seedNormalize = false) {
     deleteCollection: jest.fn(async (id: string) => { collections.delete(id); }),
     testConnection: jest.fn(async () => true),
   };
-  return { store, collections, client };
+  return { store, collections, attachments, client };
 }
 
 function makeVaultStore() {
   const files = new Map<string, string>();
+  const binaries = new Map<string, Buffer>();
   const reader = {
     readVault: jest.fn(async () => [...files.entries()].map(([p, content]) => ({
       path: p,
@@ -81,13 +105,24 @@ function makeVaultStore() {
     }))),
     readNote: jest.fn(),
     writeNote: jest.fn(async (p: string, content: string) => { files.set(p, content); }),
-    noteExists: jest.fn(async (p: string) => files.has(p)),
+    // Existence covers notes AND attachment binaries (used by attachment allocation/dedup).
+    noteExists: jest.fn(async (p: string) => files.has(p) || binaries.has(p)),
     deleteNote: jest.fn(async (p: string) => { files.delete(p); }),
     moveNote: jest.fn(async (oldP: string, newP: string) => {
       if (files.has(oldP)) { files.set(newP, files.get(oldP)!); files.delete(oldP); }
     }),
+    readBinary: jest.fn(async (p: string) => binaries.get(p)!),
+    writeBinary: jest.fn(async (p: string, data: Buffer) => { binaries.set(p, data); }),
+    listAllFiles: jest.fn(async () => [...files.keys(), ...binaries.keys()]),
+    resolveAttachment: jest.fn(async (target: string, sourcePath: string) => {
+      // Mirror the engine's heuristic enough for tests: verbatim, then by basename.
+      if (binaries.has(target)) return target;
+      const name = target.split('/').pop()!;
+      const hit = [...binaries.keys()].find(p => p.split('/').pop() === name);
+      return hit;
+    }),
   };
-  return { files, reader };
+  return { files, binaries, reader };
 }
 
 function clearWriteMocks(client: ReturnType<typeof makeOutlineStore>['client'], reader: ReturnType<typeof makeVaultStore>['reader']) {
@@ -99,8 +134,13 @@ function clearWriteMocks(client: ReturnType<typeof makeOutlineStore>['client'], 
   client.updateCollection.mockClear();
   client.deleteCollection.mockClear();
   client.getDocument.mockClear();
+  client.downloadAttachment.mockClear();
+  client.createAttachment.mockClear();
+  client.uploadAttachment.mockClear();
+  client.deleteAttachment.mockClear();
   reader.writeNote.mockClear();
   reader.deleteNote.mockClear();
+  reader.writeBinary.mockClear();
 }
 
 function expectNoWrites(client: ReturnType<typeof makeOutlineStore>['client'], reader: ReturnType<typeof makeVaultStore>['reader']) {
@@ -111,8 +151,13 @@ function expectNoWrites(client: ReturnType<typeof makeOutlineStore>['client'], r
   expect(client.createCollection).not.toHaveBeenCalled();
   expect(client.updateCollection).not.toHaveBeenCalled();
   expect(client.deleteCollection).not.toHaveBeenCalled();
+  expect(client.downloadAttachment).not.toHaveBeenCalled();
+  expect(client.createAttachment).not.toHaveBeenCalled();
+  expect(client.uploadAttachment).not.toHaveBeenCalled();
+  expect(client.deleteAttachment).not.toHaveBeenCalled();
   expect(reader.writeNote).not.toHaveBeenCalled();
   expect(reader.deleteNote).not.toHaveBeenCalled();
+  expect(reader.writeBinary).not.toHaveBeenCalled();
 }
 
 describe('SyncEngine', () => {
@@ -134,6 +179,9 @@ describe('SyncEngine', () => {
       syncInterval: 300,
       conflictResolution: 'last-write-wins',
       ignorePaths: [],
+      attachmentFolder: 'attachments',
+      syncAttachments: true,
+      cleanupOrphanAttachments: false,
     };
 
     mockObsidianReader.mockClear();
@@ -145,6 +193,9 @@ describe('SyncEngine', () => {
       writeNote: jest.fn(),
       noteExists: jest.fn(),
       deleteNote: jest.fn(),
+      listAllFiles: jest.fn().mockResolvedValue([]),
+      readBinary: jest.fn(),
+      writeBinary: jest.fn(),
     };
 
     const mockClientInstance = {
@@ -155,6 +206,9 @@ describe('SyncEngine', () => {
       updateDocument: jest.fn(),
       deleteDocument: jest.fn(),
       createCollection: jest.fn(),
+      downloadAttachment: jest.fn(),
+      createAttachment: jest.fn(),
+      uploadAttachment: jest.fn(),
       testConnection: jest.fn().mockResolvedValue(true),
     };
 
@@ -514,6 +568,9 @@ describe('SyncEngine idempotency', () => {
       syncInterval: 300,
       conflictResolution: 'last-write-wins',
       ignorePaths: [],
+      attachmentFolder: 'attachments',
+      syncAttachments: true,
+      cleanupOrphanAttachments: false,
     };
     mockObsidianReader.mockClear();
     mockOutlineClient.mockClear();
@@ -1063,5 +1120,288 @@ describe('SyncEngine idempotency', () => {
     const r3 = await engine.sync();
     expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
     expectNoWrites(store.client, vault.reader);
+  });
+
+  // ── Attachments (Phase A: Outline→Obsidian download) ─────────────────────────
+
+  function seedDocWithAttachment(
+    store: ReturnType<typeof makeOutlineStore>,
+    opts: { id?: string; text: string; attId?: string; data?: string; ct?: string } = { text: '' },
+  ) {
+    store.collections.set('col-ToDo', { id: 'col-ToDo', name: 'ToDo', description: null });
+    if (opts.attId) {
+      store.attachments.set(opts.attId, {
+        id: opts.attId, data: Buffer.from(opts.data ?? 'BINARY'), contentType: opts.ct ?? 'image/png',
+      });
+    }
+    store.store.set(opts.id ?? 'docA', {
+      id: opts.id ?? 'docA', title: 'WithImage', text: opts.text,
+      updatedAt: new Date(900 * 1000).toISOString(),
+      collectionId: 'col-ToDo', parentDocumentId: null, published: true,
+    });
+  }
+
+  test('Outline→Obsidian: attachment pulled into folder, embed rewritten, then no-op', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    seedDocWithAttachment(store, {
+      text: 'See ![pic](/api/attachments.redirect?id=att-1) here',
+      attId: 'att-1', data: 'PNGDATA', ct: 'image/png',
+    });
+    const engine = wire(store, vault);
+
+    const r1 = await engine.sync();
+    expect(r1.created).toBe(1);
+    // Binary downloaded into the attachments/ folder
+    const binPath = [...vault.binaries.keys()][0];
+    expect(binPath).toMatch(/^attachments\//);
+    expect(binPath.endsWith('.png')).toBe(true);
+    expect(vault.binaries.get(binPath)!.toString()).toBe('PNGDATA');
+    // Note body rewritten to a local embed — no redirect URL leaks into the vault
+    const body = vault.files.get('ToDo/WithImage.md')!;
+    expect(body).not.toContain('attachments.redirect');
+    expect(body).toContain('![pic](attachments/');
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(r2).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+    expect(store.client.downloadAttachment).not.toHaveBeenCalled(); // no re-download
+  });
+
+  test('attachment doc: Outline bumps updatedAt but content identical → canonical no-op', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    seedDocWithAttachment(store, {
+      text: 'pre ![cap](/api/attachments.redirect?id=att-9) post',
+      attId: 'att-9', data: 'XYZ', ct: 'image/png',
+    });
+    const engine = wire(store, vault);
+    await engine.sync();
+
+    // Outline touches the doc (new updatedAt) without changing content → forces a re-fetch,
+    // but the canonical form is identical, so nothing should be pushed/pulled/downloaded.
+    store.store.get('docA')!.updatedAt = new Date(5000 * 1000).toISOString();
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(r2).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('note embeds and external image URLs are NOT downloaded as attachments', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    seedDocWithAttachment(store, {
+      text: 'wiki ![[Some Note]] ext ![x](https://example.com/y.png) end',
+    });
+    const engine = wire(store, vault);
+
+    const r1 = await engine.sync();
+    expect(r1.created).toBe(1);
+    expect(store.client.downloadAttachment).not.toHaveBeenCalled();
+    expect(vault.binaries.size).toBe(0);
+    // Body passes through untouched (no attachment rewriting)
+    expect(vault.files.get('ToDo/WithImage.md')).toBe('wiki ![[Some Note]] ext ![x](https://example.com/y.png) end');
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(r2).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('multiple attachments in one doc are each pulled once', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    seedDocWithAttachment(store, {
+      text: '![a](/api/attachments.redirect?id=att-a) and ![b](/api/attachments.redirect?id=att-b)',
+      attId: 'att-a', data: 'AAA', ct: 'image/png',
+    });
+    store.attachments.set('att-b', { id: 'att-b', data: Buffer.from('BBB'), contentType: 'application/pdf' });
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    expect(vault.binaries.size).toBe(2);
+    expect([...vault.binaries.keys()].some(p => p.endsWith('.pdf'))).toBe(true);
+    const body = vault.files.get('ToDo/WithImage.md')!;
+    expect(body).not.toContain('attachments.redirect');
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(r2).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('syncAttachments=false leaves redirect URLs untouched (feature toggle)', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    seedDocWithAttachment(store, {
+      text: 'x ![p](/api/attachments.redirect?id=att-1) y',
+      attId: 'att-1', data: 'D', ct: 'image/png',
+    });
+    config.syncAttachments = false;
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    expect(store.client.downloadAttachment).not.toHaveBeenCalled();
+    expect(vault.binaries.size).toBe(0);
+    expect(vault.files.get('ToDo/WithImage.md')).toContain('attachments.redirect');
+  });
+
+  // ── Attachments (Phase B: Obsidian→Outline upload) ───────────────────────────
+
+  test('Obsidian→Outline: local attachment uploaded, embed rewritten, then no-op', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.binaries.set('attachments/pic.png', Buffer.from('IMG-BYTES'));
+    vault.files.set('ToDo/Note.md', 'before ![[attachments/pic.png]] after');
+    const engine = wire(store, vault);
+
+    const r1 = await engine.sync();
+    expect(r1.created).toBe(1);
+    expect(store.client.createAttachment).toHaveBeenCalledTimes(1);
+    expect(store.client.uploadAttachment).toHaveBeenCalledTimes(1);
+    const doc = [...store.store.values()][0];
+    expect(doc.text).toContain('/api/attachments.redirect?id=');
+    expect(doc.text).not.toContain('![['); // wikilink rewritten to a redirect URL
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(r2).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('markdown embed (relative path) is uploaded too', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.binaries.set('attachments/doc.pdf', Buffer.from('%PDF-1.4'));
+    vault.files.set('ToDo/Note.md', '![the pdf](attachments/doc.pdf)');
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    expect(store.client.uploadAttachment).toHaveBeenCalledTimes(1);
+    const doc = [...store.store.values()][0];
+    expect(doc.text).toContain('/api/attachments.redirect?id=');
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(r2).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('attachment binary changed (same embed text) → re-uploaded once, then no-op', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.binaries.set('attachments/pic.png', Buffer.from('V1'));
+    vault.files.set('ToDo/Note.md', '![[attachments/pic.png]]');
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    expect(store.client.uploadAttachment).toHaveBeenCalledTimes(1);
+
+    // Replace the image content (same path/name, new bytes); note text unchanged.
+    vault.binaries.set('attachments/pic.png', Buffer.from('V2-different-bytes'));
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(store.client.uploadAttachment).toHaveBeenCalledTimes(1); // exactly one re-upload
+    expect(r2.updated).toBe(1);
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('round-trip: pushed attachment pulls into a second device, then no-op', async () => {
+    const store = makeOutlineStore();
+    const vaultA = makeVaultStore();
+    vaultA.binaries.set('attachments/pic.png', Buffer.from('ROUNDTRIP'));
+    vaultA.files.set('ToDo/Note.md', '![[attachments/pic.png]]');
+    const engineA = wire(store, vaultA);
+    await engineA.sync(); // uploads to Outline
+
+    // Second device: fresh state (separate HOME) + fresh vault, same Outline instance.
+    const home2 = await fs.mkdtemp(path.join(os.tmpdir(), 'obsline-idem-dev2-'));
+    process.env.HOME = home2;
+    try {
+      const vaultB = makeVaultStore();
+      const engineB = wire(store, vaultB);
+      const rB = await engineB.sync();
+      expect(rB.created).toBe(1);
+      // The attachment was downloaded into B and the body uses a local embed.
+      expect([...vaultB.binaries.keys()].some(p => p.startsWith('attachments/'))).toBe(true);
+      const body = vaultB.files.get('ToDo/Note.md')!;
+      expect(body).toContain('attachments/');
+      expect(body).not.toContain('attachments.redirect');
+
+      clearWriteMocks(store.client, vaultB.reader);
+      const rB2 = await engineB.sync();
+      expect(rB2).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+      expectNoWrites(store.client, vaultB.reader);
+    } finally {
+      process.env.HOME = tempVault;
+      await fs.remove(home2);
+    }
+  });
+
+  test('syncAttachments=false does not upload local embeds (pushed raw, unchanged behaviour)', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.binaries.set('attachments/pic.png', Buffer.from('X'));
+    vault.files.set('ToDo/Note.md', '![[attachments/pic.png]]');
+    config.syncAttachments = false;
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    expect(store.client.createAttachment).not.toHaveBeenCalled();
+    expect(store.client.uploadAttachment).not.toHaveBeenCalled();
+    const doc = [...store.store.values()][0];
+    expect(doc.text).toBe('![[attachments/pic.png]]'); // pushed raw, as before the feature
+  });
+
+  test('orphan cleanup (opt-in): local attachment removed → Outline attachment deleted', async () => {
+    config.syncAttachments = true;
+    config.cleanupOrphanAttachments = true;
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.binaries.set('attachments/pic.png', Buffer.from('IMG'));
+    vault.files.set('ToDo/Note.md', '![[attachments/pic.png]]');
+    const engine = wire(store, vault);
+    await engine.sync();
+    const attId = [...store.attachments.keys()][0];
+    expect(store.attachments.has(attId)).toBe(true);
+
+    // User removes the note and its attachment file from the vault.
+    vault.files.delete('ToDo/Note.md');
+    vault.binaries.delete('attachments/pic.png');
+
+    clearWriteMocks(store.client, vault.reader);
+    await engine.sync();
+    expect(store.client.deleteAttachment).toHaveBeenCalledWith(attId);
+    expect(store.attachments.has(attId)).toBe(false);
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('orphan cleanup stays off by default: removed attachment is NOT deleted from Outline', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.binaries.set('attachments/pic.png', Buffer.from('IMG'));
+    vault.files.set('ToDo/Note.md', '![[attachments/pic.png]]');
+    const engine = wire(store, vault);
+    await engine.sync();
+    const attId = [...store.attachments.keys()][0];
+
+    vault.files.delete('ToDo/Note.md');
+    vault.binaries.delete('attachments/pic.png');
+
+    clearWriteMocks(store.client, vault.reader);
+    await engine.sync();
+    expect(store.client.deleteAttachment).not.toHaveBeenCalled(); // default off
+    expect(store.attachments.has(attId)).toBe(true);              // attachment preserved
   });
 });

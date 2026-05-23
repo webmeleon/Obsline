@@ -2957,6 +2957,7 @@ var SyncEngine = class {
       for (const note of sortedNotes) {
         const knownId = state.pathToOutlineId[note.path];
         const outlineDoc = knownId ? docById.get(knownId) : void 0;
+        let localContent = note.content;
         if (!outlineDoc) {
           if (knownId && !outlineIdSet.has(knownId))
             continue;
@@ -3019,6 +3020,7 @@ var SyncEngine = class {
                     freshUpdatedAt.set(existing.id, upd.updatedAt);
                   } else {
                     await this.writeNote(note.path, existing.text);
+                    localContent = existing.text;
                   }
                   result.updated++;
                 } catch (e) {
@@ -3053,6 +3055,7 @@ var SyncEngine = class {
                   freshUpdatedAt.set(outlineDoc.id, upd.updatedAt);
                 } else {
                   await this.writeNote(note.path, outlineDoc.text);
+                  localContent = outlineDoc.text;
                 }
                 result.updated++;
                 contentUpdated = true;
@@ -3090,7 +3093,7 @@ var SyncEngine = class {
             }
           }
         }
-        state.fileHashes[note.path] = this.hash(note.content);
+        state.fileHashes[note.path] = this.hash(localContent);
       }
     }
     if (!firstSync || dir === "outline-to-obsidian" || dir === "bidirectional") {
@@ -3109,6 +3112,7 @@ var SyncEngine = class {
             await this.writeNote(notePath, doc.text);
             state.outlineIdMap[doc.id] = notePath;
             state.pathToOutlineId[notePath] = doc.id;
+            state.fileHashes[notePath] = this.hash(doc.text);
             pathToOutlineIds.set(notePath, [doc.id]);
             result.created++;
           } catch (e) {

@@ -186,6 +186,9 @@ export class SyncEngine {
     for (const note of sortedNotes) {
       const knownOutlineId = this.syncState.pathToOutlineId[note.path];
       const outlineDoc = knownOutlineId ? docById.get(knownOutlineId) : undefined;
+      // Tracks the content the local file ends up with this run; when Outline wins a
+      // conflict we overwrite the file, so fileHashes must reflect that — not note.content.
+      let localContent = note.content;
 
       if (!outlineDoc) {
         // Doc was known but is no longer in Outline (e.g. collection deleted) → skip,
@@ -254,6 +257,7 @@ export class SyncEngine {
                 freshUpdatedAt.set(existing.id, upd.updatedAt);
               } else {
                 await this.obsidianReader.writeNote(note.path, resolvedNote.content);
+                localContent = resolvedNote.content;
               }
               result.updated++;
             }
@@ -282,6 +286,7 @@ export class SyncEngine {
               freshUpdatedAt.set(outlineDoc.id, upd.updatedAt);
             } else {
               await this.obsidianReader.writeNote(note.path, resolvedNote.content);
+              localContent = resolvedNote.content;
             }
             result.updated++;
             contentUpdated = true;
@@ -313,7 +318,7 @@ export class SyncEngine {
         }
       }
 
-      this.syncState.fileHashes[note.path] = this.hashContent(note.content);
+      this.syncState.fileHashes[note.path] = this.hashContent(localContent);
     }
 
     // ── Outline → Obsidian (create/update) ─────────────────────────────────
@@ -333,6 +338,7 @@ export class SyncEngine {
         await this.obsidianReader.writeNote(notePath, outlineDoc.text);
         this.syncState.outlineIdMap[outlineDoc.id] = notePath;
         this.syncState.pathToOutlineId[notePath] = outlineDoc.id;
+        this.syncState.fileHashes[notePath] = this.hashContent(outlineDoc.text);
         pathToOutlineIds.set(notePath, [outlineDoc.id]);
         result.created++;
       } else {

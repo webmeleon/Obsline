@@ -651,4 +651,32 @@ describe('SyncEngine idempotency', () => {
     expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
     expectNoWrites(store.client, vault.reader);
   });
+
+  test('Outline wins a conflict (pull) — settles to no-op, no stale re-push', async () => {
+    // Regression: after Outline wins and the local file is overwritten, fileHashes must
+    // reflect the pulled content — otherwise the next sync sees a phantom local change
+    // and pushes the old content back (non-idempotent).
+    config.conflictResolution = 'outline-wins';
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('ToDo/Doc.md', 'local v1');
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    const docId = [...store.store.keys()][0];
+
+    // Outline-side edit (newer); outline-wins forces the pull regardless of timestamps
+    store.store.get(docId)!.text = 'remote v2';
+    store.store.get(docId)!.updatedAt = new Date(9000 * 1000).toISOString();
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(r2.updated).toBe(1);
+    expect(vault.files.get('ToDo/Doc.md')).toBe('remote v2'); // local overwritten by Outline
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
 });

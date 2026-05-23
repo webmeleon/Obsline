@@ -147,6 +147,9 @@ export class SyncEngine {
       for (const note of sortedNotes) {
         const knownId = state.pathToOutlineId[note.path];
         const outlineDoc = knownId ? docById.get(knownId) : undefined;
+        // Tracks the content the local file ends up with this run; when Outline wins a
+        // conflict we overwrite the file, so fileHashes must reflect that — not note.content.
+        let localContent = note.content;
 
         if (!outlineDoc) {
           // Doc was known but is no longer in Outline (e.g. collection deleted) → skip,
@@ -213,6 +216,7 @@ export class SyncEngine {
                     freshUpdatedAt.set(existing.id, upd.updatedAt);
                   } else {
                     await this.writeNote(note.path, existing.text);
+                    localContent = existing.text;
                   }
                   result.updated++;
                 } catch (e) {
@@ -249,6 +253,7 @@ export class SyncEngine {
                   freshUpdatedAt.set(outlineDoc.id, upd.updatedAt);
                 } else {
                   await this.writeNote(note.path, outlineDoc.text);
+                  localContent = outlineDoc.text;
                 }
                 result.updated++;
                 contentUpdated = true;
@@ -291,7 +296,7 @@ export class SyncEngine {
           }
         }
 
-        state.fileHashes[note.path] = this.hash(note.content);
+        state.fileHashes[note.path] = this.hash(localContent);
       }
     }
 
@@ -316,6 +321,7 @@ export class SyncEngine {
             await this.writeNote(notePath, doc.text);
             state.outlineIdMap[doc.id] = notePath;
             state.pathToOutlineId[notePath] = doc.id;
+            state.fileHashes[notePath] = this.hash(doc.text);
             pathToOutlineIds.set(notePath, [doc.id]);
             result.created++;
           } catch (e) {

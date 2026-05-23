@@ -3101,7 +3101,8 @@ var SyncEngine = class {
           const currentParent = (_b = outlineDoc.parentDocumentId) != null ? _b : void 0;
           const pathImpliesParent = note.path.split("/").filter((p) => p).length > 2;
           const parentResolved = !pathImpliesParent || expectedParent !== void 0;
-          if (expectedCollection && expectedCollection === outlineDoc.collectionId && parentResolved && expectedParent !== currentParent) {
+          const outlineUnchanged = outlineDoc.updatedAt === state.outlineUpdatedAt[outlineDoc.id];
+          if (outlineUnchanged && expectedCollection && expectedCollection === outlineDoc.collectionId && parentResolved && expectedParent !== currentParent) {
             onProgress == null ? void 0 : onProgress(`Moving to correct parent: ${note.path}`);
             try {
               const moved = await this.client.moveDocument(outlineDoc.id, expectedCollection, expectedParent);

@@ -309,7 +309,11 @@ export class SyncEngine {
           const currentParent = outlineDoc.parentDocumentId ?? undefined;
           const pathImpliesParent = note.path.split('/').filter(p => p).length > 2;
           const parentResolved = !pathImpliesParent || expectedParent !== undefined;
-          if (expectedCollection && expectedCollection === outlineDoc.collectionId &&
+          // Only push a parent fixup when Outline hasn't changed this doc since last sync. If it has,
+          // the parent difference is an Outline-side re-parent → it must be PULLED (Outline→Obsidian
+          // re-path), not pushed back here.
+          const outlineUnchanged = outlineDoc.updatedAt === state.outlineUpdatedAt[outlineDoc.id];
+          if (outlineUnchanged && expectedCollection && expectedCollection === outlineDoc.collectionId &&
               parentResolved && expectedParent !== currentParent) {
             onProgress?.(`Moving to correct parent: ${note.path}`);
             try {

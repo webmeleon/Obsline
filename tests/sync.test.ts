@@ -918,4 +918,150 @@ describe('SyncEngine idempotency', () => {
     expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
     expectNoWrites(store.client, vault.reader);
   });
+
+  // ── Coverage matrix (Phase 3): deep nesting + all op combinations ────────────
+
+  test('deep 3-level nesting: created with correct parent chain, then no-op', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('Col/A.md', 'a');
+    vault.files.set('Col/A/B.md', 'b');
+    vault.files.set('Col/A/B/C.md', 'c');
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    const a = [...store.store.values()].find(d => d.title === 'A')!;
+    const b = [...store.store.values()].find(d => d.title === 'B')!;
+    const c = [...store.store.values()].find(d => d.title === 'C')!;
+    expect(b.parentDocumentId).toBe(a.id);
+    expect(c.parentDocumentId).toBe(b.id);
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(r2).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('Outline-side re-parent (same collection) → local file relocated under new parent', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('Col/P1.md', 'p1');
+    vault.files.set('Col/P2.md', 'p2');
+    vault.files.set('Col/P1/Child.md', 'c');
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    const p2 = [...store.store.values()].find(d => d.title === 'P2')!;
+    const child = [...store.store.values()].find(d => d.title === 'Child')!;
+
+    // Re-parent Child under P2 in Outline
+    store.store.get(child.id)!.parentDocumentId = p2.id;
+    store.store.get(child.id)!.updatedAt = new Date(9000 * 1000).toISOString();
+
+    clearWriteMocks(store.client, vault.reader);
+    await engine.sync();
+    expect(vault.files.has('Col/P2/Child.md')).toBe(true);
+    expect(vault.files.has('Col/P1/Child.md')).toBe(false);
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('Obsidian delete file → Outline doc deleted, then no-op', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('Col/A.md', 'a');
+    vault.files.set('Col/B.md', 'b'); // sibling keeps the collection non-empty
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    const aId = [...store.store.entries()].find(([, d]) => d.title === 'A')![0];
+
+    vault.files.delete('Col/A.md');
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(store.client.deleteDocument).toHaveBeenCalledWith(aId);
+    expect([...store.store.values()].some(d => d.title === 'A')).toBe(false);
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('Outline delete doc → local file deleted, then no-op', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('Col/A.md', 'a');
+    vault.files.set('Col/B.md', 'b');
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    const aId = [...store.store.entries()].find(([, d]) => d.title === 'A')![0];
+
+    store.store.delete(aId); // deleted in Outline
+    clearWriteMocks(store.client, vault.reader);
+    await engine.sync();
+    expect(vault.files.has('Col/A.md')).toBe(false);
+    expect(vault.files.has('Col/B.md')).toBe(true);
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('content update Obsidian→Outline, then no-op', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('Col/A.md', 'v1');
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    const aId = [...store.store.keys()][0];
+
+    vault.files.set('Col/A.md', 'v2 edited');
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(r2.updated).toBe(1);
+    expect(store.store.get(aId)!.text).toBe('v2 edited');
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('combined sync: create + move + delete in one run, then no-op', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('ColA/Keep.md', 'keep');
+    vault.files.set('ColA/Move.md', 'move');
+    vault.files.set('ColA/Del.md', 'del');
+    vault.files.set('ColB/Anchor.md', 'anchor'); // ensures ColB exists
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    const delId = [...store.store.entries()].find(([, d]) => d.title === 'Del')![0];
+    const moveId = [...store.store.entries()].find(([, d]) => d.title === 'Move')![0];
+
+    // Three different ops at once:
+    vault.files.set('ColA/New.md', 'new');          // create
+    vault.files.delete('ColA/Move.md');             // move ColA/Move.md → ColB/Move.md
+    vault.files.set('ColB/Move.md', 'move');
+    vault.files.delete('ColA/Del.md');              // delete
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect([...store.store.values()].some(d => d.title === 'New')).toBe(true);     // created
+    expect(store.store.get(moveId)!.collectionId).toBe('col-ColB');               // moved
+    expect(store.store.has(delId)).toBe(false);                                   // deleted
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
 });

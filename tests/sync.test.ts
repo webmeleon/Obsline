@@ -109,9 +109,13 @@ describe('SyncEngine', () => {
   let syncEngine: SyncEngine;
   let config: ObslineConfig;
   let tempVault: string;
+  let realHome: string | undefined;
 
   beforeEach(async () => {
     tempVault = await fs.mkdtemp(path.join(os.tmpdir(), 'obsline-sync-test-'));
+    // Isolate state I/O: sync() persists to $HOME/.obsline — never touch the real one.
+    realHome = process.env.HOME;
+    process.env.HOME = tempVault;
 
     config = {
       obsidianVault: tempVault,
@@ -151,6 +155,7 @@ describe('SyncEngine', () => {
   });
 
   afterEach(async () => {
+    process.env.HOME = realHome;
     await fs.remove(tempVault);
   });
 

@@ -1,4 +1,4 @@
-# Obsline v0.5.5
+# Obsline v0.5.6
 
 Bi-directional sync between [Obsidian](https://obsidian.md) and a self-hosted [Outline](https://www.getoutline.com/) instance.
 
@@ -25,7 +25,7 @@ Bi-directional sync between [Obsidian](https://obsidian.md) and a self-hosted [O
 
 **Option A — Download release (no build required)**
 
-1. Download `obsline-v0.5.5.zip` from the [latest release](https://github.com/webmeleon/Obsline/releases/latest)
+1. Download `obsline-v0.5.6.zip` from the [latest release](https://github.com/webmeleon/Obsline/releases/latest)
 2. Unzip and run the install script:
 
    ```bash

@@ -168,8 +168,14 @@ export class SyncEngine {
             }
             const adoptKey = `${collectionId}::${note.title}`;
             const existing = outlineDocByKey.get(adoptKey);
-            if (existing && !state.outlineIdMap[existing.id]) {
+            const existingMappedPath = existing ? state.outlineIdMap[existing.id] : undefined;
+            const canAdopt = existing && (!existingMappedPath || !obsidianMap.has(existingMappedPath));
+            if (canAdopt && existing) {
               onProgress?.(`Adopting existing Outline doc: ${note.path}`);
+              if (existingMappedPath) {
+                delete state.pathToOutlineId[existingMappedPath];
+                delete state.fileHashes[existingMappedPath];
+              }
               state.outlineIdMap[existing.id] = note.path;
               state.pathToOutlineId[note.path] = existing.id;
             } else {

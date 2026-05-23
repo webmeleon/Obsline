@@ -201,11 +201,19 @@ export class SyncEngine {
             continue;
           }
 
-          // Adopt existing doc instead of duplicating (index file = same doc as flat)
+          // Adopt existing doc instead of duplicating (index file = same doc as flat).
+          // Also adopt when the mapped path no longer exists in Obsidian — both sides
+          // renamed independently and content changed so hash detection missed it.
           const adoptKey = `${collectionId}::${note.title}`;
           const existing = outlineDocByKey.get(adoptKey);
-          if (existing && !this.syncState.outlineIdMap[existing.id]) {
+          const existingMappedPath = existing ? this.syncState.outlineIdMap[existing.id] : undefined;
+          const canAdopt = existing && (!existingMappedPath || !obsidianMap.has(existingMappedPath));
+          if (canAdopt && existing) {
             this.logger.info(`Adopting existing Outline doc for "${note.path}"`);
+            if (existingMappedPath) {
+              delete this.syncState.pathToOutlineId[existingMappedPath];
+              delete this.syncState.fileHashes[existingMappedPath];
+            }
             this.syncState.outlineIdMap[existing.id] = note.path;
             this.syncState.pathToOutlineId[note.path] = existing.id;
           } else {

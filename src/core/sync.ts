@@ -327,8 +327,32 @@ export class SyncEngine {
       const notePath = this.buildObsidianPath(outlineDoc, collectionNameById, docById);
       const mappedPath = this.syncState.outlineIdMap[outlineDoc.id];
 
-      // Known doc: updates handled in Obsidian→Outline pass; deletions in deletion pass.
-      if (mappedPath) continue;
+      // Known doc: content updates handled in Obsidian→Outline pass; deletions in deletion pass.
+      // But if the doc moved collection/parent in Outline, its computed path now differs from
+      // where the local file lives — relocate it. Scoped to pure location moves (same filename)
+      // to avoid fighting conflict-resolution on Outline-side title renames.
+      if (mappedPath) {
+        const sameName = mappedPath.split('/').pop() === notePath.split('/').pop();
+        if (mappedPath !== notePath && sameName && !this.syncState.pathToOutlineId[notePath]) {
+          try {
+            if (await this.obsidianReader.noteExists(mappedPath)) {
+              await this.obsidianReader.moveNote(mappedPath, notePath);
+            }
+            this.syncState.outlineIdMap[outlineDoc.id] = notePath;
+            delete this.syncState.pathToOutlineId[mappedPath];
+            this.syncState.pathToOutlineId[notePath] = outlineDoc.id;
+            if (this.syncState.fileHashes[mappedPath] !== undefined) {
+              this.syncState.fileHashes[notePath] = this.syncState.fileHashes[mappedPath];
+              delete this.syncState.fileHashes[mappedPath];
+            }
+            this.logger.info(`Outline moved doc — relocating "${mappedPath}" → "${notePath}"`);
+            result.renamed++;
+          } catch (e) {
+            this.logger.warn(`Re-path failed for "${mappedPath}" → "${notePath}": ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+        continue;
+      }
 
       const existingIds = pathToOutlineIds.get(notePath) || [];
       if (existingIds.length > 0) {

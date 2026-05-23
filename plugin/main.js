@@ -3100,8 +3100,28 @@ var SyncEngine = class {
       for (const doc of fullDocs) {
         const notePath = this.buildPath(doc, collectionNameById, docById);
         const mappedPath = state.outlineIdMap[doc.id];
-        if (mappedPath)
+        if (mappedPath) {
+          const sameName = mappedPath.split("/").pop() === notePath.split("/").pop();
+          if (mappedPath !== notePath && sameName && !state.pathToOutlineId[notePath]) {
+            try {
+              if (this.noteExists(mappedPath)) {
+                onProgress == null ? void 0 : onProgress(`Relocating: ${mappedPath} \u2192 ${notePath}`);
+                await this.moveNote(mappedPath, notePath);
+              }
+              state.outlineIdMap[doc.id] = notePath;
+              delete state.pathToOutlineId[mappedPath];
+              state.pathToOutlineId[notePath] = doc.id;
+              if (state.fileHashes[mappedPath] !== void 0) {
+                state.fileHashes[notePath] = state.fileHashes[mappedPath];
+                delete state.fileHashes[mappedPath];
+              }
+              result.renamed++;
+            } catch (e) {
+              result.errors.push(`Re-path failed for ${mappedPath} \u2192 ${notePath}: ${String(e)}`);
+            }
+          }
           continue;
+        }
         const existingIds = pathToOutlineIds.get(notePath) || [];
         if (existingIds.length > 0) {
           state.outlineIdMap[doc.id] = notePath;
@@ -3326,6 +3346,14 @@ var SyncEngine = class {
     } else {
       await this.ensureFolder(notePath);
       await this.app.vault.create(notePath, content);
+    }
+  }
+  async moveNote(oldPath, newPath) {
+    const file = this.app.vault.getAbstractFileByPath(oldPath);
+    if (file instanceof import_obsidian2.TFile) {
+      await this.ensureFolder(newPath);
+      await this.app.vault.rename(file, newPath);
+      await this.pruneEmptyFolders(oldPath);
     }
   }
   async ensureFolder(notePath) {

@@ -78,6 +78,9 @@ function makeVaultStore() {
     writeNote: jest.fn(async (p: string, content: string) => { files.set(p, content); }),
     noteExists: jest.fn(async (p: string) => files.has(p)),
     deleteNote: jest.fn(async (p: string) => { files.delete(p); }),
+    moveNote: jest.fn(async (oldP: string, newP: string) => {
+      if (files.has(oldP)) { files.set(newP, files.get(oldP)!); files.delete(oldP); }
+    }),
   };
   return { files, reader };
 }
@@ -645,6 +648,34 @@ describe('SyncEngine idempotency', () => {
     const r2 = await engine.sync();
     expect(r2.renamed).toBe(1);
     expect(store.store.get(docId)!.title).toBe('Beta');
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('doc moved to another collection in Outline → local file relocated, then no-op', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('ColA/Note.md', 'body');
+    const engine = wire(store, vault);
+
+    await engine.sync(); // creates ColA + doc
+    const docId = [...store.store.keys()][0];
+
+    // Move the doc into a different collection in Outline
+    store.collections.set('col-ColB', { id: 'col-ColB', name: 'ColB', description: null });
+    store.store.get(docId)!.collectionId = 'col-ColB';
+    store.store.get(docId)!.updatedAt = new Date(9000 * 1000).toISOString();
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(r2.renamed).toBe(1);
+    expect(vault.files.has('ColB/Note.md')).toBe(true);   // relocated
+    expect(vault.files.has('ColA/Note.md')).toBe(false);  // old gone
+    expect(store.store.size).toBe(1);                      // no duplicate
+    expect(store.client.deleteDocument).not.toHaveBeenCalled(); // not deleted from Outline
 
     clearWriteMocks(store.client, vault.reader);
     const r3 = await engine.sync();

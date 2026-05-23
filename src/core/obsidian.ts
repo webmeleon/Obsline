@@ -96,6 +96,15 @@ export class ObsidianReader {
     logger.info(`Wrote note: ${relativePath} (${stats.size} bytes)`);
   }
 
+  async moveNote(oldRelativePath: string, newRelativePath: string): Promise<void> {
+    const oldFull = path.join(this.vaultPath, oldRelativePath);
+    const newFull = path.join(this.vaultPath, newRelativePath);
+    await fs.ensureDir(path.dirname(newFull));
+    await fs.move(oldFull, newFull, { overwrite: true });
+    logger.info(`Moved note: ${oldRelativePath} → ${newRelativePath}`);
+    await this.pruneEmptyFolders(oldRelativePath);
+  }
+
   async deleteNote(relativePath: string): Promise<void> {
     const fullPath = path.join(this.vaultPath, relativePath);
 

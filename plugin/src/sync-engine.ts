@@ -307,8 +307,32 @@ export class SyncEngine {
         const notePath = this.buildPath(doc, collectionNameById, docById);
         const mappedPath = state.outlineIdMap[doc.id];
 
-        // Known doc: updates handled in Obsidian→Outline pass; deletions in deletion pass.
-        if (mappedPath) continue;
+        // Known doc: content updates handled in Obsidian→Outline pass; deletions in deletion pass.
+        // But if the doc moved collection/parent in Outline, its computed path now differs from
+        // where the local file lives — relocate it. Scoped to pure location moves (same filename)
+        // to avoid fighting conflict-resolution on Outline-side title renames.
+        if (mappedPath) {
+          const sameName = mappedPath.split('/').pop() === notePath.split('/').pop();
+          if (mappedPath !== notePath && sameName && !state.pathToOutlineId[notePath]) {
+            try {
+              if (this.noteExists(mappedPath)) {
+                onProgress?.(`Relocating: ${mappedPath} → ${notePath}`);
+                await this.moveNote(mappedPath, notePath);
+              }
+              state.outlineIdMap[doc.id] = notePath;
+              delete state.pathToOutlineId[mappedPath];
+              state.pathToOutlineId[notePath] = doc.id;
+              if (state.fileHashes[mappedPath] !== undefined) {
+                state.fileHashes[notePath] = state.fileHashes[mappedPath];
+                delete state.fileHashes[mappedPath];
+              }
+              result.renamed++;
+            } catch (e) {
+              result.errors.push(`Re-path failed for ${mappedPath} → ${notePath}: ${String(e)}`);
+            }
+          }
+          continue;
+        }
 
         const existingIds = pathToOutlineIds.get(notePath) || [];
 
@@ -585,6 +609,15 @@ export class SyncEngine {
     } else {
       await this.ensureFolder(notePath);
       await this.app.vault.create(notePath, content);
+    }
+  }
+
+  private async moveNote(oldPath: string, newPath: string): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(oldPath);
+    if (file instanceof TFile) {
+      await this.ensureFolder(newPath);
+      await this.app.vault.rename(file, newPath);
+      await this.pruneEmptyFolders(oldPath);
     }
   }
 

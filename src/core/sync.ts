@@ -54,8 +54,7 @@ export class SyncEngine {
         this.outlineClient.listCollections(),
       ]);
 
-      const outlineIdSet = new Set(outlineDocuments.map(d => d.id));
-      const updatedCollections = await this.ensureCollectionsForFolders(obsidianNotes, collections, outlineIdSet);
+      const updatedCollections = await this.ensureCollectionsForFolders(obsidianNotes, collections);
       const result = await this.syncBidirectional(obsidianNotes, outlineDocuments, updatedCollections);
 
       this.syncState.lastSyncTime = startTime;
@@ -79,7 +78,6 @@ export class SyncEngine {
   private async ensureCollectionsForFolders(
     notes: ObsidianNote[],
     collections: OutlineCollection[],
-    outlineIdSet: Set<string>,
   ): Promise<OutlineCollection[]> {
     const existingNames = new Set(collections.map(c => c.name));
     const vaultFolders = new Set<string>();
@@ -96,12 +94,14 @@ export class SyncEngine {
     for (const folder of vaultFolders) {
       if (existingNames.has(folder)) continue;
 
-      // Don't recreate a collection whose vault files all map to now-deleted Outline docs.
+      // Only create a collection for a folder that holds genuinely NEW (unmapped) notes.
+      // If every note here is already known, this is a stale folder name — e.g. the Outline
+      // collection was renamed (docs still live under the new name) or deleted. Creating a
+      // collection would spawn a ghost; the re-path / deletion passes handle these instead.
       const folderNotes = notes.filter(n => n.path.startsWith(folder + '/'));
-      if (folderNotes.length > 0 && folderNotes.every(n => {
-        const id = this.syncState.pathToOutlineId[n.path];
-        return id !== undefined && !outlineIdSet.has(id);
-      })) continue;
+      if (folderNotes.length > 0 && folderNotes.every(n =>
+        this.syncState.pathToOutlineId[n.path] !== undefined
+      )) continue;
 
       this.logger.info(`Creating collection for new folder: ${folder}`);
       const newCollection = await this.outlineClient.createCollection(folder);

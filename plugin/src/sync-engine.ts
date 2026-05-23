@@ -103,7 +103,7 @@ export class SyncEngine {
     const outlineIdSet = new Set(outlineDocsList.map(d => d.id));
 
     // Ensure collections exist for all vault folders + inbox for root-level notes
-    const updatedCollections = await this.ensureCollections(vaultNotes, collections, outlineIdSet, onProgress);
+    const updatedCollections = await this.ensureCollections(vaultNotes, collections, onProgress);
     const collectionNameById = new Map(updatedCollections.map(c => [c.id, c.name]));
     const collectionIdByName = new Map(updatedCollections.map(c => [c.name, c.id]));
 
@@ -532,7 +532,6 @@ export class SyncEngine {
   private async ensureCollections(
     notes: VaultNote[],
     collections: OutlineCollection[],
-    outlineIdSet: Set<string>,
     onProgress?: (msg: string) => void,
   ): Promise<OutlineCollection[]> {
     const existingNames = new Set(collections.map(c => c.name));
@@ -553,13 +552,14 @@ export class SyncEngine {
     for (const folder of folders) {
       if (existingNames.has(folder)) continue;
 
-      // Don't recreate a collection whose vault files all map to now-deleted Outline docs.
-      // The deletion pass will remove those Obsidian files on this same sync run.
+      // Only create a collection for a folder that holds genuinely NEW (unmapped) notes.
+      // If every note here is already known, this is a stale folder name — e.g. the Outline
+      // collection was renamed (docs still live under the new name) or deleted. Creating a
+      // collection would spawn a ghost; the re-path / deletion passes handle these instead.
       const folderNotes = notes.filter(n => n.path.startsWith(folder + '/'));
-      if (folderNotes.length > 0 && folderNotes.every(n => {
-        const id = state.pathToOutlineId[n.path];
-        return id !== undefined && !outlineIdSet.has(id);
-      })) continue;
+      if (folderNotes.length > 0 && folderNotes.every(n =>
+        state.pathToOutlineId[n.path] !== undefined
+      )) continue;
 
       onProgress?.(`Creating Outline collection: ${folder}`);
       try {

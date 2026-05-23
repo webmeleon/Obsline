@@ -683,6 +683,35 @@ describe('SyncEngine idempotency', () => {
     expectNoWrites(store.client, vault.reader);
   });
 
+  test('collection renamed in Outline → no ghost collection, local folder relocated, then no-op', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('ColA/Note.md', 'body');
+    const engine = wire(store, vault);
+
+    await engine.sync(); // creates collection ColA + doc
+    const docId = [...store.store.keys()][0];
+    const collId = store.store.get(docId)!.collectionId;
+    expect(store.collections.size).toBe(1);
+
+    // Rename the collection in Outline (same id, new name)
+    store.collections.get(collId)!.name = 'ColRenamed';
+    store.store.get(docId)!.updatedAt = new Date(9000 * 1000).toISOString();
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(store.client.createCollection).not.toHaveBeenCalled(); // no ghost collection
+    expect(store.collections.size).toBe(1);                       // still exactly one
+    expect(vault.files.has('ColRenamed/Note.md')).toBe(true);     // file relocated
+    expect(vault.files.has('ColA/Note.md')).toBe(false);          // old gone
+    expect(store.store.size).toBe(1);                             // no duplicate doc
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
   test('Outline wins a conflict (pull) — settles to no-op, no stale re-push', async () => {
     // Regression: after Outline wins and the local file is overwritten, fileHashes must
     // reflect the pulled content — otherwise the next sync sees a phantom local change

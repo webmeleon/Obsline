@@ -59,6 +59,11 @@ function makeOutlineStore(seedNormalize = false) {
       collections.set(c.id, c);
       return c;
     }),
+    updateCollection: jest.fn(async (id: string, name: string) => {
+      const c = collections.get(id)!;
+      c.name = name;
+      return { ...c };
+    }),
     deleteCollection: jest.fn(async (id: string) => { collections.delete(id); }),
     testConnection: jest.fn(async () => true),
   };
@@ -91,6 +96,7 @@ function clearWriteMocks(client: ReturnType<typeof makeOutlineStore>['client'], 
   client.moveDocument.mockClear();
   client.deleteDocument.mockClear();
   client.createCollection.mockClear();
+  client.updateCollection.mockClear();
   client.deleteCollection.mockClear();
   client.getDocument.mockClear();
   reader.writeNote.mockClear();
@@ -103,6 +109,7 @@ function expectNoWrites(client: ReturnType<typeof makeOutlineStore>['client'], r
   expect(client.moveDocument).not.toHaveBeenCalled();
   expect(client.deleteDocument).not.toHaveBeenCalled();
   expect(client.createCollection).not.toHaveBeenCalled();
+  expect(client.updateCollection).not.toHaveBeenCalled();
   expect(client.deleteCollection).not.toHaveBeenCalled();
   expect(reader.writeNote).not.toHaveBeenCalled();
   expect(reader.deleteNote).not.toHaveBeenCalled();
@@ -705,6 +712,92 @@ describe('SyncEngine idempotency', () => {
     expect(vault.files.has('ColRenamed/Note.md')).toBe(true);     // file relocated
     expect(vault.files.has('ColA/Note.md')).toBe(false);          // old gone
     expect(store.store.size).toBe(1);                             // no duplicate doc
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('Obsidian-side parent-note rename → children follow under new parent, then no-op', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('Projects/Website.md', 'parent');
+    vault.files.set('Projects/Website/Design.md', 'child');
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    const parentId = [...store.store.entries()].find(([, d]) => d.title === 'Website')![0];
+    const childId = [...store.store.entries()].find(([, d]) => d.title === 'Design')![0];
+    expect(store.store.get(childId)!.parentDocumentId).toBe(parentId);
+
+    // Rename the parent note in Obsidian
+    vault.files.delete('Projects/Website.md');
+    vault.files.set('Projects/Site.md', 'parent');
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(store.store.get(parentId)!.title).toBe('Site');          // parent renamed in Outline
+    expect(vault.files.has('Projects/Site/Design.md')).toBe(true);  // child relocated to follow
+    expect(vault.files.has('Projects/Website/Design.md')).toBe(false);
+    expect(store.store.get(childId)!.parentDocumentId).toBe(parentId); // still same parent doc
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('Obsidian-side folder rename → Outline collection renamed (not recreated), then no-op', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('Foo/A.md', 'aaa');
+    vault.files.set('Foo/B.md', 'bbb');
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    const fooId = [...store.collections.values()].find(c => c.name === 'Foo')!.id;
+
+    // Rename the folder in Obsidian: all files move Foo/ → Bar/
+    vault.files.delete('Foo/A.md');
+    vault.files.delete('Foo/B.md');
+    vault.files.set('Bar/A.md', 'aaa');
+    vault.files.set('Bar/B.md', 'bbb');
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(store.client.updateCollection).toHaveBeenCalledWith(fooId, 'Bar'); // renamed in place
+    expect(store.client.createCollection).not.toHaveBeenCalled();              // no ghost collection
+    expect(store.collections.size).toBe(1);                                    // still one collection
+    expect(store.collections.get(fooId)!.name).toBe('Bar');                    // same id, new name
+    expect(store.store.size).toBe(2);                                          // no duplicate docs
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('Obsidian-side file move to another collection → Outline doc moved, then no-op', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('ColA/Note.md', 'body');
+    vault.files.set('ColB/Keep.md', 'keep'); // ensures ColB collection exists
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    const noteId = [...store.store.entries()].find(([, d]) => d.title === 'Note')![0];
+    expect(store.store.get(noteId)!.collectionId).toBe('col-ColA');
+
+    // Move the file from ColA to ColB in the vault
+    vault.files.delete('ColA/Note.md');
+    vault.files.set('ColB/Note.md', 'body');
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(store.client.moveDocument).toHaveBeenCalled();
+    expect(store.store.get(noteId)!.collectionId).toBe('col-ColB'); // doc relocated in Outline
+    expect(store.store.size).toBe(2);                                // no duplicate
 
     clearWriteMocks(store.client, vault.reader);
     const r3 = await engine.sync();

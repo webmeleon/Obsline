@@ -103,7 +103,7 @@ export class SyncEngine {
     const outlineIdSet = new Set(outlineDocsList.map(d => d.id));
 
     // Ensure collections exist for all vault folders + inbox for root-level notes
-    const updatedCollections = await this.ensureCollections(vaultNotes, collections, onProgress);
+    const updatedCollections = await this.ensureCollections(vaultNotes, collections, outlineDocsList, onProgress);
     const collectionNameById = new Map(updatedCollections.map(c => [c.id, c.name]));
     const collectionIdByName = new Map(updatedCollections.map(c => [c.name, c.id]));
 
@@ -187,6 +187,17 @@ export class SyncEngine {
               freshUpdatedAt.set(renamedFromId, renamed.updatedAt);
               docById.set(renamed.id, renamed);
               result.renamed++;
+              // If the new path also lands in a different collection/parent (file moved between
+              // folders, not just renamed in place), move the Outline doc to match (Gap 2).
+              const { collectionId: tgtColl, parentDocumentId: tgtParent } =
+                this.collectionFromPath(note.path, collectionIdByName, state);
+              const pathImpliesParent = note.path.split('/').filter(p => p).length > 2;
+              const parentResolved = !pathImpliesParent || tgtParent !== undefined;
+              if (tgtColl && parentResolved &&
+                  (tgtColl !== renamed.collectionId || tgtParent !== (renamed.parentDocumentId ?? undefined))) {
+                const moved = await this.client.moveDocument(renamedFromId, tgtColl, tgtParent);
+                if (moved) { freshUpdatedAt.set(renamedFromId, moved.updatedAt); docById.set(moved.id, moved); }
+              }
             } catch (e) {
               result.errors.push(`Rename failed: ${String(e)}`);
             }
@@ -287,6 +298,10 @@ export class SyncEngine {
           }
 
           // Move document if parent has changed (fixes flat docs from first sync).
+          // NOTE: only the PARENT is compared here, never the collection. A mapped note keeps the
+          // same path, so a collection mismatch means Outline moved the doc — that must be PULLED
+          // (handled in the Outline→Obsidian re-path), not pushed back here. Obsidian-side moves
+          // change the path and go through rename detection (which does its own move, Gap 2).
           // Only move when the target is unambiguous: if the path implies a parent
           // (deep path) but it isn't resolvable yet, skip rather than relocate to root.
           const { collectionId: expectedCollection, parentDocumentId: expectedParent } =
@@ -294,7 +309,8 @@ export class SyncEngine {
           const currentParent = outlineDoc.parentDocumentId ?? undefined;
           const pathImpliesParent = note.path.split('/').filter(p => p).length > 2;
           const parentResolved = !pathImpliesParent || expectedParent !== undefined;
-          if (expectedCollection && parentResolved && expectedParent !== currentParent) {
+          if (expectedCollection && expectedCollection === outlineDoc.collectionId &&
+              parentResolved && expectedParent !== currentParent) {
             onProgress?.(`Moving to correct parent: ${note.path}`);
             try {
               const moved = await this.client.moveDocument(outlineDoc.id, expectedCollection, expectedParent);
@@ -556,9 +572,13 @@ export class SyncEngine {
   private async ensureCollections(
     notes: VaultNote[],
     collections: OutlineCollection[],
+    outlineDocsList: OutlineDocument[],
     onProgress?: (msg: string) => void,
   ): Promise<OutlineCollection[]> {
     const existingNames = new Set(collections.map(c => c.name));
+    const collById = new Map(collections.map(c => [c.id, c]));
+    const docCollById = new Map(outlineDocsList.map(d => [d.id, d.collectionId]));
+    const allVaultPaths = new Set(notes.map(n => n.path));
     const folders = new Set<string>();
     const hasRootLevelNotes = notes.some(n => !n.path.includes('/'));
 
@@ -576,11 +596,28 @@ export class SyncEngine {
     for (const folder of folders) {
       if (existingNames.has(folder)) continue;
 
+      const folderNotes = notes.filter(n => n.path.startsWith(folder + '/'));
+
+      // Obsidian-side collection rename: every note in this folder maps to docs in ONE existing
+      // collection whose own folder is gone from the vault (all its files moved here). Rename the
+      // Outline collection (preserves id/sharing) instead of creating a new one + leaving a ghost.
+      const renamedFrom = this.detectRenamedCollection(folder, folderNotes, folders, docCollById, collById, allVaultPaths);
+      if (renamedFrom) {
+        onProgress?.(`Collection renamed: "${renamedFrom.name}" → "${folder}"`);
+        try {
+          const upd = await this.client.updateCollection(renamedFrom.id, folder);
+          renamedFrom.name = upd.name;
+          existingNames.add(folder);
+          continue;
+        } catch (e) {
+          onProgress?.(`Collection rename failed for "${folder}": ${String(e)}`);
+        }
+      }
+
       // Only create a collection for a folder that holds genuinely NEW (unmapped) notes.
       // If every note here is already known, this is a stale folder name — e.g. the Outline
       // collection was renamed (docs still live under the new name) or deleted. Creating a
       // collection would spawn a ghost; the re-path / deletion passes handle these instead.
-      const folderNotes = notes.filter(n => n.path.startsWith(folder + '/'));
       if (folderNotes.length > 0 && folderNotes.every(n =>
         state.pathToOutlineId[n.path] !== undefined
       )) continue;
@@ -595,6 +632,46 @@ export class SyncEngine {
       }
     }
     return updated;
+  }
+
+  /**
+   * Detect an Obsidian-side collection rename: `folder` is a new top-level folder name, every note
+   * in it resolves (via state or last-synced fileHashes) to docs in a SINGLE existing collection C,
+   * and C's own name is no longer a vault folder (all its files moved into `folder`). Returns C.
+   */
+  private detectRenamedCollection(
+    folder: string,
+    folderNotes: VaultNote[],
+    vaultFolders: Set<string>,
+    docCollById: Map<string, string>,
+    collById: Map<string, OutlineCollection>,
+    allVaultPaths: Set<string>,
+  ): OutlineCollection | undefined {
+    if (folderNotes.length === 0) return undefined;
+    const state = this.settings.syncState;
+    const collsInvolved = new Set<string>();
+    for (const note of folderNotes) {
+      // The vault must have MOVED this note here: it can't already be mapped at its current path
+      // (that would mean only Outline's collection name changed — an Outline-side rename, which
+      // the Outline→Obsidian pass handles; renaming the collection back here would fight it).
+      if (state.pathToOutlineId[note.path]) return undefined;
+      const h = this.hash(note.content);
+      let docId: string | undefined;
+      for (const [oldPath, oh] of Object.entries(state.fileHashes)) {
+        if (oh === h && oldPath !== note.path && !allVaultPaths.has(oldPath)) {
+          docId = state.pathToOutlineId[oldPath];
+          break;
+        }
+      }
+      const cid = docId ? docCollById.get(docId) : undefined;
+      if (!cid) return undefined; // a genuinely new note here → not a pure rename
+      collsInvolved.add(cid);
+    }
+    if (collsInvolved.size !== 1) return undefined;
+    const col = collById.get([...collsInvolved][0]);
+    if (!col || col.name === folder) return undefined;
+    if (vaultFolders.has(col.name)) return undefined; // old folder still present → not a rename
+    return col;
   }
 
   private async readVault(): Promise<VaultNote[]> {

@@ -2797,6 +2797,10 @@ var OutlineClient = class {
     const res = await this.post("/collections.create", body);
     return res.data;
   }
+  async updateCollection(id, name) {
+    const res = await this.post("/collections.update", { id, name });
+    return res.data;
+  }
   async listDocuments() {
     const all = [];
     const limit = 100;
@@ -2893,7 +2897,7 @@ var SyncEngine = class {
     return { deleted, failed };
   }
   async sync(onProgress) {
-    var _a, _b;
+    var _a, _b, _c;
     const result = { created: 0, updated: 0, deleted: 0, renamed: 0, conflicts: [], errors: [] };
     const state = this.settings.syncState;
     onProgress == null ? void 0 : onProgress("Reading vault\u2026");
@@ -2928,7 +2932,7 @@ var SyncEngine = class {
       }
     }
     const outlineIdSet = new Set(outlineDocsList.map((d) => d.id));
-    const updatedCollections = await this.ensureCollections(vaultNotes, collections, onProgress);
+    const updatedCollections = await this.ensureCollections(vaultNotes, collections, outlineDocsList, onProgress);
     const collectionNameById = new Map(updatedCollections.map((c) => [c.id, c.name]));
     const collectionIdByName = new Map(updatedCollections.map((c) => [c.name, c.id]));
     const outlineDocByKey = /* @__PURE__ */ new Map();
@@ -2993,6 +2997,16 @@ var SyncEngine = class {
               freshUpdatedAt.set(renamedFromId, renamed.updatedAt);
               docById.set(renamed.id, renamed);
               result.renamed++;
+              const { collectionId: tgtColl, parentDocumentId: tgtParent } = this.collectionFromPath(note.path, collectionIdByName, state);
+              const pathImpliesParent = note.path.split("/").filter((p) => p).length > 2;
+              const parentResolved = !pathImpliesParent || tgtParent !== void 0;
+              if (tgtColl && parentResolved && (tgtColl !== renamed.collectionId || tgtParent !== ((_a = renamed.parentDocumentId) != null ? _a : void 0))) {
+                const moved = await this.client.moveDocument(renamedFromId, tgtColl, tgtParent);
+                if (moved) {
+                  freshUpdatedAt.set(renamedFromId, moved.updatedAt);
+                  docById.set(moved.id, moved);
+                }
+              }
             } catch (e) {
               result.errors.push(`Rename failed: ${String(e)}`);
             }
@@ -3084,10 +3098,10 @@ var SyncEngine = class {
             }
           }
           const { collectionId: expectedCollection, parentDocumentId: expectedParent } = this.collectionFromPath(note.path, collectionIdByName, state);
-          const currentParent = (_a = outlineDoc.parentDocumentId) != null ? _a : void 0;
+          const currentParent = (_b = outlineDoc.parentDocumentId) != null ? _b : void 0;
           const pathImpliesParent = note.path.split("/").filter((p) => p).length > 2;
           const parentResolved = !pathImpliesParent || expectedParent !== void 0;
-          if (expectedCollection && parentResolved && expectedParent !== currentParent) {
+          if (expectedCollection && expectedCollection === outlineDoc.collectionId && parentResolved && expectedParent !== currentParent) {
             onProgress == null ? void 0 : onProgress(`Moving to correct parent: ${note.path}`);
             try {
               const moved = await this.client.moveDocument(outlineDoc.id, expectedCollection, expectedParent);
@@ -3107,7 +3121,7 @@ var SyncEngine = class {
     }
     if (!firstSync || dir === "outline-to-obsidian" || dir === "bidirectional") {
       for (const rawDoc of fullDocs) {
-        const doc = (_b = docById.get(rawDoc.id)) != null ? _b : rawDoc;
+        const doc = (_c = docById.get(rawDoc.id)) != null ? _c : rawDoc;
         const notePath = this.buildPath(doc, collectionNameById, docById);
         const mappedPath = state.outlineIdMap[doc.id];
         if (mappedPath) {
@@ -3296,8 +3310,11 @@ var SyncEngine = class {
       }
     }
   }
-  async ensureCollections(notes, collections, onProgress) {
+  async ensureCollections(notes, collections, outlineDocsList, onProgress) {
     const existingNames = new Set(collections.map((c) => c.name));
+    const collById = new Map(collections.map((c) => [c.id, c]));
+    const docCollById = new Map(outlineDocsList.map((d) => [d.id, d.collectionId]));
+    const allVaultPaths = new Set(notes.map((n) => n.path));
     const folders = /* @__PURE__ */ new Set();
     const hasRootLevelNotes = notes.some((n) => !n.path.includes("/"));
     for (const note of notes) {
@@ -3314,6 +3331,18 @@ var SyncEngine = class {
       if (existingNames.has(folder))
         continue;
       const folderNotes = notes.filter((n) => n.path.startsWith(folder + "/"));
+      const renamedFrom = this.detectRenamedCollection(folder, folderNotes, folders, docCollById, collById, allVaultPaths);
+      if (renamedFrom) {
+        onProgress == null ? void 0 : onProgress(`Collection renamed: "${renamedFrom.name}" \u2192 "${folder}"`);
+        try {
+          const upd = await this.client.updateCollection(renamedFrom.id, folder);
+          renamedFrom.name = upd.name;
+          existingNames.add(folder);
+          continue;
+        } catch (e) {
+          onProgress == null ? void 0 : onProgress(`Collection rename failed for "${folder}": ${String(e)}`);
+        }
+      }
       if (folderNotes.length > 0 && folderNotes.every(
         (n) => state.pathToOutlineId[n.path] !== void 0
       ))
@@ -3327,6 +3356,41 @@ var SyncEngine = class {
       }
     }
     return updated;
+  }
+  /**
+   * Detect an Obsidian-side collection rename: `folder` is a new top-level folder name, every note
+   * in it resolves (via state or last-synced fileHashes) to docs in a SINGLE existing collection C,
+   * and C's own name is no longer a vault folder (all its files moved into `folder`). Returns C.
+   */
+  detectRenamedCollection(folder, folderNotes, vaultFolders, docCollById, collById, allVaultPaths) {
+    if (folderNotes.length === 0)
+      return void 0;
+    const state = this.settings.syncState;
+    const collsInvolved = /* @__PURE__ */ new Set();
+    for (const note of folderNotes) {
+      if (state.pathToOutlineId[note.path])
+        return void 0;
+      const h = this.hash(note.content);
+      let docId;
+      for (const [oldPath, oh] of Object.entries(state.fileHashes)) {
+        if (oh === h && oldPath !== note.path && !allVaultPaths.has(oldPath)) {
+          docId = state.pathToOutlineId[oldPath];
+          break;
+        }
+      }
+      const cid = docId ? docCollById.get(docId) : void 0;
+      if (!cid)
+        return void 0;
+      collsInvolved.add(cid);
+    }
+    if (collsInvolved.size !== 1)
+      return void 0;
+    const col = collById.get([...collsInvolved][0]);
+    if (!col || col.name === folder)
+      return void 0;
+    if (vaultFolders.has(col.name))
+      return void 0;
+    return col;
   }
   async readVault() {
     const files = this.app.vault.getMarkdownFiles();

@@ -52,6 +52,11 @@ export class OutlineClient {
     return res.data;
   }
 
+  async updateCollection(id: string, name: string): Promise<OutlineCollection> {
+    const res = await this.post<{ data: OutlineCollection }>('/collections.update', { id, name });
+    return res.data;
+  }
+
   async listDocuments(): Promise<OutlineDocument[]> {
     type DocEntry = {
       id: string; title: string; updatedAt: string; createdAt: string;

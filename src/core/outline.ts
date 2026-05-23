@@ -198,6 +198,17 @@ export class OutlineClient {
     }
   }
 
+  async updateCollection(id: string, name: string): Promise<OutlineCollection> {
+    try {
+      const response = await this.client.post<{ data: OutlineCollection }>('/collections.update', { id, name });
+      logger.info(`Renamed collection ${id} → ${name}`);
+      return response.data.data;
+    } catch (error) {
+      logger.error(`Failed to update collection ${id}: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
   async deleteCollection(id: string): Promise<void> {
     try {
       await this.client.post('/collections.delete', { id });

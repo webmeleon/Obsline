@@ -2893,7 +2893,7 @@ var SyncEngine = class {
     return { deleted, failed };
   }
   async sync(onProgress) {
-    var _a;
+    var _a, _b;
     const result = { created: 0, updated: 0, deleted: 0, renamed: 0, conflicts: [], errors: [] };
     const state = this.settings.syncState;
     onProgress == null ? void 0 : onProgress("Reading vault\u2026");
@@ -2950,7 +2950,7 @@ var SyncEngine = class {
     const firstSync = !state.firstSyncDone;
     const dir = this.settings.initialSyncDirection;
     if (!firstSync || dir === "obsidian-to-outline" || dir === "bidirectional") {
-      await this.ensureParentDocsForFolders(vaultNotes, collectionIdByName, outlineDocByKey, state, outlineIdSet, freshUpdatedAt);
+      await this.ensureParentDocsForFolders(vaultNotes, collectionIdByName, outlineDocByKey, state, outlineIdSet, freshUpdatedAt, docById);
       const sortedNotes = [...vaultNotes].sort(
         (a, b) => a.path.split("/").length - b.path.split("/").length
       );
@@ -2991,6 +2991,7 @@ var SyncEngine = class {
               delete state.pathToOutlineId[renamedFromPath];
               delete state.fileHashes[renamedFromPath];
               freshUpdatedAt.set(renamedFromId, renamed.updatedAt);
+              docById.set(renamed.id, renamed);
               result.renamed++;
             } catch (e) {
               result.errors.push(`Rename failed: ${String(e)}`);
@@ -3018,6 +3019,7 @@ var SyncEngine = class {
                   if (this.resolveConflict(note, existing) === "obsidian") {
                     const upd = await this.client.updateDocument(existing.id, note.content, note.title);
                     freshUpdatedAt.set(existing.id, upd.updatedAt);
+                    docById.set(upd.id, upd);
                   } else {
                     await this.writeNote(note.path, existing.text);
                     localContent = existing.text;
@@ -3034,6 +3036,7 @@ var SyncEngine = class {
                 state.outlineIdMap[created.id] = note.path;
                 state.pathToOutlineId[note.path] = created.id;
                 freshUpdatedAt.set(created.id, created.updatedAt);
+                docById.set(created.id, created);
                 result.created++;
               } catch (e) {
                 result.errors.push(`Create failed for ${note.path}: ${String(e)}`);
@@ -3046,13 +3049,16 @@ var SyncEngine = class {
           if (outlineDoc.text !== "") {
             const docHash = this.hash(outlineDoc.text);
             const titleChanged = note.title !== outlineDoc.title;
-            if (noteHash !== docHash || titleChanged) {
+            const localUnchanged = state.fileHashes[note.path] === noteHash;
+            const outlineOnlyRename = titleChanged && noteHash === docHash && localUnchanged;
+            if (!outlineOnlyRename && (noteHash !== docHash || titleChanged)) {
               const winner = this.resolveConflict(note, outlineDoc);
               onProgress == null ? void 0 : onProgress(`Updating: ${note.path}`);
               try {
                 if (winner === "obsidian") {
                   const upd = await this.client.updateDocument(outlineDoc.id, note.content, note.title);
                   freshUpdatedAt.set(outlineDoc.id, upd.updatedAt);
+                  docById.set(upd.id, upd);
                 } else {
                   await this.writeNote(note.path, outlineDoc.text);
                   localContent = outlineDoc.text;
@@ -3069,6 +3075,7 @@ var SyncEngine = class {
               try {
                 const upd = await this.client.updateDocument(outlineDoc.id, note.content, note.title);
                 freshUpdatedAt.set(outlineDoc.id, upd.updatedAt);
+                docById.set(upd.id, upd);
                 result.updated++;
                 contentUpdated = true;
               } catch (e) {
@@ -3084,8 +3091,10 @@ var SyncEngine = class {
             onProgress == null ? void 0 : onProgress(`Moving to correct parent: ${note.path}`);
             try {
               const moved = await this.client.moveDocument(outlineDoc.id, expectedCollection, expectedParent);
-              if (moved)
+              if (moved) {
                 freshUpdatedAt.set(outlineDoc.id, moved.updatedAt);
+                docById.set(moved.id, moved);
+              }
               if (!contentUpdated)
                 result.updated++;
             } catch (e) {
@@ -3097,12 +3106,17 @@ var SyncEngine = class {
       }
     }
     if (!firstSync || dir === "outline-to-obsidian" || dir === "bidirectional") {
-      for (const doc of fullDocs) {
+      for (const rawDoc of fullDocs) {
+        const doc = (_b = docById.get(rawDoc.id)) != null ? _b : rawDoc;
         const notePath = this.buildPath(doc, collectionNameById, docById);
         const mappedPath = state.outlineIdMap[doc.id];
         if (mappedPath) {
+          const localNote = obsidianMap.get(mappedPath);
+          const hasFile = localNote !== void 0;
           const sameName = mappedPath.split("/").pop() === notePath.split("/").pop();
-          if (mappedPath !== notePath && sameName && !state.pathToOutlineId[notePath]) {
+          const localUnchanged = hasFile && state.fileHashes[mappedPath] === this.hash(localNote.content);
+          const canRepath = mappedPath !== notePath && (!hasFile || sameName || localUnchanged) && !state.pathToOutlineId[notePath];
+          if (canRepath) {
             try {
               if (this.noteExists(mappedPath)) {
                 onProgress == null ? void 0 : onProgress(`Relocating: ${mappedPath} \u2192 ${notePath}`);
@@ -3227,7 +3241,7 @@ var SyncEngine = class {
     state.firstSyncDone = true;
     return result;
   }
-  async ensureParentDocsForFolders(notes, collectionIdByName, outlineDocByKey, state, outlineIdSet, freshUpdatedAt) {
+  async ensureParentDocsForFolders(notes, collectionIdByName, outlineDocByKey, state, outlineIdSet, freshUpdatedAt, docById) {
     const notePaths = new Set(notes.map((n) => n.path));
     const folderPaths = /* @__PURE__ */ new Set();
     for (const note of notes) {
@@ -3276,6 +3290,7 @@ var SyncEngine = class {
           state.outlineIdMap[created.id] = flatFilePath;
           state.pathToOutlineId[flatFilePath] = created.id;
           freshUpdatedAt.set(created.id, created.updatedAt);
+          docById.set(created.id, created);
         } catch (e) {
         }
       }

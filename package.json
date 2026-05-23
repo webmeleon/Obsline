@@ -1,6 +1,6 @@
 {
   "name": "obsline",
-  "version": "0.5.10",
+  "version": "0.5.11",
   "description": "Bi-directional sync connector between Obsidian and Outline",
   "main": "dist/index.js",
   "type": "commonjs",

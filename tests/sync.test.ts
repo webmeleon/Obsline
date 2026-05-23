@@ -712,6 +712,92 @@ describe('SyncEngine idempotency', () => {
     expectNoWrites(store.client, vault.reader);
   });
 
+  test('Outline-side title rename (local unchanged) → file renamed locally, no push-back', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('ToDo/Note.md', 'body');
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    const docId = [...store.store.keys()][0];
+
+    // Rename only the title in Outline (collection unchanged, content unchanged)
+    store.store.get(docId)!.title = 'NoteRenamed';
+    store.store.get(docId)!.updatedAt = new Date(9000 * 1000).toISOString();
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(vault.files.has('ToDo/NoteRenamed.md')).toBe(true);
+    expect(vault.files.has('ToDo/Note.md')).toBe(false);
+    expect(r2.renamed).toBe(1);
+    expect(store.client.updateDocument).not.toHaveBeenCalled(); // no push-back of old title
+    expect(store.store.get(docId)!.title).toBe('NoteRenamed');   // Outline title preserved
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('Outline-side title + collection change combined → relocated to new path', async () => {
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('ColA/Note.md', 'body');
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    const docId = [...store.store.keys()][0];
+
+    // Combined: title rename AND collection move in Outline
+    store.collections.set('col-ColB', { id: 'col-ColB', name: 'ColB', description: null });
+    store.store.get(docId)!.title = 'NoteRenamed';
+    store.store.get(docId)!.collectionId = 'col-ColB';
+    store.store.get(docId)!.updatedAt = new Date(9000 * 1000).toISOString();
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    expect(vault.files.has('ColB/NoteRenamed.md')).toBe(true);  // new folder AND new name
+    expect(vault.files.has('ColA/Note.md')).toBe(false);         // old gone
+    expect(r2.renamed).toBe(1);
+    expect(store.client.updateDocument).not.toHaveBeenCalled();
+    expect(store.client.createCollection).not.toHaveBeenCalled(); // no ghost ColA
+
+    clearWriteMocks(store.client, vault.reader);
+    const r3 = await engine.sync();
+    expect(r3).toMatchObject({ created: 0, updated: 0, deleted: 0, renamed: 0 });
+    expectNoWrites(store.client, vault.reader);
+  });
+
+  test('title diff + LOCAL file also changed → real conflict, NOT silent re-path', async () => {
+    // Regression: the Outline-only-rename bypass must NOT trigger when the local file was
+    // also edited. That would silently overwrite or drop the user's local change.
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    vault.files.set('ToDo/Note.md', 'original body');
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    const docId = [...store.store.keys()][0];
+
+    // Outline renames title; local file ALSO edited
+    store.store.get(docId)!.title = 'NoteRenamed';
+    store.store.get(docId)!.updatedAt = new Date(9000 * 1000).toISOString();
+    vault.files.set('ToDo/Note.md', 'local edit'); // user modified locally
+
+    clearWriteMocks(store.client, vault.reader);
+    const r2 = await engine.sync();
+    // Conflict resolution must run (some write happened, either direction).
+    expect(r2.updated + r2.renamed).toBeGreaterThanOrEqual(1);
+    // The Outline-only-rename bypass MUST have been skipped — bypass would have moved
+    // the file WITHOUT consulting conflict resolution and lost the local edit silently.
+    const localEditStillThere = vault.files.has('ToDo/Note.md') && vault.files.get('ToDo/Note.md') === 'local edit';
+    const pushedToOutline = (store.client.updateDocument as any).mock.calls.length > 0;
+    const pulledOutlineWin = vault.files.has('ToDo/NoteRenamed.md') && vault.files.get('ToDo/NoteRenamed.md') === store.store.get(docId)!.text;
+    // Either obsidian wins (push) OR outline wins (write outline body somewhere) — but a
+    // decision was made, not silently overridden.
+    expect(localEditStillThere || pushedToOutline || pulledOutlineWin).toBe(true);
+  });
+
   test('Outline wins a conflict (pull) — settles to no-op, no stale re-push', async () => {
     // Regression: after Outline wins and the local file is overwritten, fileHashes must
     // reflect the pulled content — otherwise the next sync sees a phantom local change

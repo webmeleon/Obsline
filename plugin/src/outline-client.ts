@@ -105,10 +105,15 @@ export class OutlineClient {
     await this.post('/collections.delete', { id });
   }
 
-  async moveDocument(id: string, collectionId: string, parentDocumentId?: string): Promise<void> {
+  async moveDocument(id: string, collectionId: string, parentDocumentId?: string): Promise<OutlineDocument | undefined> {
     const body: Record<string, unknown> = { id, collectionId };
     if (parentDocumentId) body.parentDocumentId = parentDocumentId;
-    await this.post('/documents.move', body);
+    // documents.move returns { data: { documents: [...affected docs...] } }
+    const res = await this.post<{ data: { documents?: Array<Partial<OutlineDocument> & { id: string }> } }>(
+      '/documents.move', body,
+    );
+    const moved = res.data?.documents?.find(d => d.id === id);
+    return moved ? { ...(moved as OutlineDocument), published: moved.published ?? true } : undefined;
   }
 
   async deleteDocument(id: string): Promise<void> {

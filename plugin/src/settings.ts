@@ -190,7 +190,7 @@ export class ObslineSettingTab extends PluginSettingTab {
             return;
           }
           this.plugin.settings.syncState = {
-            lastSyncTime: 0, fileHashes: {}, outlineIdMap: {}, pathToOutlineId: {}, firstSyncDone: false,
+            lastSyncTime: 0, fileHashes: {}, outlineIdMap: {}, pathToOutlineId: {}, outlineUpdatedAt: {}, firstSyncDone: false,
           };
           await this.plugin.saveSettings();
           new Notice('Sync State zurückgesetzt. Outline-Daten sind noch online vorhanden.');
@@ -216,7 +216,7 @@ export class ObslineSettingTab extends PluginSettingTab {
           const { deleted, failed } = await this.plugin.syncEngine.deleteAllOutline();
 
           this.plugin.settings.syncState = {
-            lastSyncTime: 0, fileHashes: {}, outlineIdMap: {}, pathToOutlineId: {}, firstSyncDone: false,
+            lastSyncTime: 0, fileHashes: {}, outlineIdMap: {}, pathToOutlineId: {}, outlineUpdatedAt: {}, firstSyncDone: false,
           };
           await this.plugin.saveSettings();
 

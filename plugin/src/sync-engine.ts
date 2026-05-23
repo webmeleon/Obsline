@@ -58,7 +58,6 @@ export class SyncEngine {
   async sync(onProgress?: (msg: string) => void): Promise<SyncResult> {
     const result: SyncResult = { created: 0, updated: 0, deleted: 0, renamed: 0, conflicts: [], errors: [] };
     const state = this.settings.syncState;
-    const lastSyncTime = state.lastSyncTime;
 
     onProgress?.('Reading vault…');
     const vaultNotes = await this.readVault();
@@ -77,7 +76,10 @@ export class SyncEngine {
 
     for (const doc of outlineDocsList) {
       const isKnown = state.outlineIdMap[doc.id] !== undefined;
-      const changedSinceLastSync = new Date(doc.updatedAt).getTime() > lastSyncTime;
+      // Per-doc change detection: compare against the updatedAt we last synced for this doc.
+      // Robust against the sync's own writes and Outline-side content normalisation (idempotent).
+      const lastSeen = state.outlineUpdatedAt[doc.id];
+      const changedSinceLastSync = !lastSeen || doc.updatedAt !== lastSeen;
 
       if (!isKnown || changedSinceLastSync) {
         try {
@@ -118,6 +120,12 @@ export class SyncEngine {
       pathToOutlineIds.get(opath)!.push(oid);
     }
 
+    // Source of truth for the post-sync outlineUpdatedAt state. Seed with the values we just
+    // observed; overwrite with the API-response updatedAt at each write site so the next sync
+    // sees the doc as unchanged (idempotent — survives Outline-side content normalisation).
+    const freshUpdatedAt = new Map<string, string>();
+    for (const [id, d] of docById) freshUpdatedAt.set(id, d.updatedAt);
+
     // Snapshot before any state mutations so rename detection can release paths first
     const knownPaths = Object.keys(state.pathToOutlineId);
     const knownIds = Object.keys(state.outlineIdMap);
@@ -129,7 +137,7 @@ export class SyncEngine {
 
     if (!firstSync || dir === 'obsidian-to-outline' || dir === 'bidirectional') {
       // Ensure virtual parent docs exist for pure-folder hierarchies before main loop
-      await this.ensureParentDocsForFolders(vaultNotes, collectionIdByName, outlineDocByKey, state, outlineIdSet);
+      await this.ensureParentDocsForFolders(vaultNotes, collectionIdByName, outlineDocByKey, state, outlineIdSet, freshUpdatedAt);
 
       // Sort by depth so parent flat-files are processed before their children
       const sortedNotes = [...vaultNotes].sort(
@@ -146,16 +154,34 @@ export class SyncEngine {
           if (knownId && !outlineIdSet.has(knownId)) continue;
 
           const noteHash = this.hash(note.content);
-          const renamedFromId = hashToOutlineId.get(noteHash);
-          const renamedFromPath = renamedFromId ? state.outlineIdMap[renamedFromId] : undefined;
+          // Rename detection: a path we knew last sync is gone, and a new note has the same
+          // content. Primary signal is our own last-synced fileHashes (works even when the
+          // Outline doc is an unchanged stub); fall back to a freshly-fetched doc's text hash.
+          let renamedFromId: string | undefined;
+          let renamedFromPath: string | undefined;
+          for (const [oldPath, h] of Object.entries(state.fileHashes)) {
+            if (h === noteHash && oldPath !== note.path && !obsidianMap.has(oldPath)) {
+              const id = state.pathToOutlineId[oldPath];
+              if (id && outlineIdSet.has(id)) { renamedFromId = id; renamedFromPath = oldPath; break; }
+            }
+          }
+          if (!renamedFromId) {
+            const byText = hashToOutlineId.get(noteHash);
+            const byTextPath = byText ? state.outlineIdMap[byText] : undefined;
+            if (byText && byTextPath && byTextPath !== note.path && !obsidianMap.has(byTextPath)) {
+              renamedFromId = byText; renamedFromPath = byTextPath;
+            }
+          }
 
           if (renamedFromId && renamedFromPath && renamedFromPath !== note.path) {
             onProgress?.(`Rename: "${renamedFromPath}" → "${note.path}"`);
             try {
-              await this.client.updateDocument(renamedFromId, note.content, note.title);
+              const renamed = await this.client.updateDocument(renamedFromId, note.content, note.title);
               state.outlineIdMap[renamedFromId] = note.path;
               state.pathToOutlineId[note.path] = renamedFromId;
               delete state.pathToOutlineId[renamedFromPath];
+              delete state.fileHashes[renamedFromPath];
+              freshUpdatedAt.set(renamedFromId, renamed.updatedAt);
               result.renamed++;
             } catch (e) {
               result.errors.push(`Rename failed: ${String(e)}`);
@@ -178,12 +204,28 @@ export class SyncEngine {
               }
               state.outlineIdMap[existing.id] = note.path;
               state.pathToOutlineId[note.path] = existing.id;
+              // Reconcile content: both sides may have diverged before the re-link.
+              // Without this the two stay permanently out of sync on body content.
+              if (existing.text !== '' && this.hash(note.content) !== this.hash(existing.text)) {
+                try {
+                  if (this.resolveConflict(note, existing) === 'obsidian') {
+                    const upd = await this.client.updateDocument(existing.id, note.content, note.title);
+                    freshUpdatedAt.set(existing.id, upd.updatedAt);
+                  } else {
+                    await this.writeNote(note.path, existing.text);
+                  }
+                  result.updated++;
+                } catch (e) {
+                  result.errors.push(`Adopt reconcile failed for ${note.path}: ${String(e)}`);
+                }
+              }
             } else {
               onProgress?.(`Creating in Outline: ${note.path}`);
               try {
                 const created = await this.client.createDocument(note.title, note.content, collectionId, parentDocumentId);
                 state.outlineIdMap[created.id] = note.path;
                 state.pathToOutlineId[note.path] = created.id;
+                freshUpdatedAt.set(created.id, created.updatedAt);
                 result.created++;
               } catch (e) {
                 result.errors.push(`Create failed for ${note.path}: ${String(e)}`);
@@ -203,7 +245,8 @@ export class SyncEngine {
               onProgress?.(`Updating: ${note.path}`);
               try {
                 if (winner === 'obsidian') {
-                  await this.client.updateDocument(outlineDoc.id, note.content, note.title);
+                  const upd = await this.client.updateDocument(outlineDoc.id, note.content, note.title);
+                  freshUpdatedAt.set(outlineDoc.id, upd.updatedAt);
                 } else {
                   await this.writeNote(note.path, outlineDoc.text);
                 }
@@ -218,7 +261,8 @@ export class SyncEngine {
             const lastKnownHash = state.fileHashes[note.path];
             if (lastKnownHash && noteHash !== lastKnownHash) {
               try {
-                await this.client.updateDocument(outlineDoc.id, note.content, note.title);
+                const upd = await this.client.updateDocument(outlineDoc.id, note.content, note.title);
+                freshUpdatedAt.set(outlineDoc.id, upd.updatedAt);
                 result.updated++;
                 contentUpdated = true;
               } catch (e) {
@@ -227,14 +271,19 @@ export class SyncEngine {
             }
           }
 
-          // Move document if parent has changed (fixes flat docs from first sync)
+          // Move document if parent has changed (fixes flat docs from first sync).
+          // Only move when the target is unambiguous: if the path implies a parent
+          // (deep path) but it isn't resolvable yet, skip rather than relocate to root.
           const { collectionId: expectedCollection, parentDocumentId: expectedParent } =
             this.collectionFromPath(note.path, collectionIdByName, state);
           const currentParent = outlineDoc.parentDocumentId ?? undefined;
-          if (expectedCollection && expectedParent !== currentParent) {
+          const pathImpliesParent = note.path.split('/').filter(p => p).length > 2;
+          const parentResolved = !pathImpliesParent || expectedParent !== undefined;
+          if (expectedCollection && parentResolved && expectedParent !== currentParent) {
             onProgress?.(`Moving to correct parent: ${note.path}`);
             try {
-              await this.client.moveDocument(outlineDoc.id, expectedCollection, expectedParent);
+              const moved = await this.client.moveDocument(outlineDoc.id, expectedCollection, expectedParent);
+              if (moved) freshUpdatedAt.set(outlineDoc.id, moved.updatedAt);
               if (!contentUpdated) result.updated++;
             } catch (e) {
               result.errors.push(`Move failed for ${note.path}: ${String(e)}`);
@@ -371,6 +420,16 @@ export class SyncEngine {
       result.deleted++;
     }
 
+    // Rebuild per-doc updatedAt from the freshest values. Entries for deleted docs drop out
+    // automatically because they're no longer in outlineIdMap. This is what makes the next
+    // sync a no-op for everything we just reconciled.
+    const rebuiltUpdatedAt: Record<string, string> = {};
+    for (const id of Object.keys(state.outlineIdMap)) {
+      const ts = freshUpdatedAt.get(id);
+      if (ts) rebuiltUpdatedAt[id] = ts;
+    }
+    state.outlineUpdatedAt = rebuiltUpdatedAt;
+
     state.lastSyncTime = Date.now();
     state.firstSyncDone = true;
 
@@ -383,6 +442,7 @@ export class SyncEngine {
     outlineDocByKey: Map<string, OutlineDocument>,
     state: SyncState,
     outlineIdSet: Set<string>,
+    freshUpdatedAt: Map<string, string>,
   ): Promise<void> {
     const notePaths = new Set(notes.map(n => n.path));
     const folderPaths = new Set<string>();
@@ -423,6 +483,7 @@ export class SyncEngine {
       if (existing && !state.outlineIdMap[existing.id]) {
         state.outlineIdMap[existing.id] = flatFilePath;
         state.pathToOutlineId[flatFilePath] = existing.id;
+        freshUpdatedAt.set(existing.id, existing.updatedAt);
       } else if (!existing) {
         try {
           const created = await this.client.createDocument(
@@ -430,6 +491,7 @@ export class SyncEngine {
           );
           state.outlineIdMap[created.id] = flatFilePath;
           state.pathToOutlineId[flatFilePath] = created.id;
+          freshUpdatedAt.set(created.id, created.updatedAt);
         } catch (e) {
           // non-fatal: children will land flat but won't break the sync
         }
@@ -547,13 +609,19 @@ export class SyncEngine {
     while (parentId) {
       const parent = docById.get(parentId);
       if (!parent) break;
-      parts.unshift(parent.title);
+      parts.unshift(this.sanitizeTitleForPath(parent.title));
       parentId = parent.parentDocumentId;
     }
     const collectionName = collectionNameById.get(doc.collectionId) ?? 'Unsorted';
     parts.unshift(collectionName);
-    parts.push(`${doc.title}.md`);
+    parts.push(`${this.sanitizeTitleForPath(doc.title)}.md`);
     return parts.join('/');
+  }
+
+  // Replace characters that are invalid in file paths (notably '/', which would otherwise
+  // create unintended subfolders and break the path↔doc round-trip).
+  private sanitizeTitleForPath(title: string): string {
+    return title.replace(/[/\\:*?"<>|]/g, '-').trim() || 'Untitled';
   }
 
   /**

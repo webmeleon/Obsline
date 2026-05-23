@@ -6,6 +6,7 @@ export interface SyncState {
   fileHashes: Record<string, string>;
   outlineIdMap: Record<string, string>;   // outlineId → obsidianPath
   pathToOutlineId: Record<string, string>; // obsidianPath → outlineId
+  outlineUpdatedAt: Record<string, string>; // outlineId → last-synced updatedAt (ISO); drives change detection
   firstSyncDone: boolean;
 }
 
@@ -33,6 +34,7 @@ export const DEFAULT_SETTINGS: ObslineSettings = {
     fileHashes: {},
     outlineIdMap: {},
     pathToOutlineId: {},
+    outlineUpdatedAt: {},
     firstSyncDone: false,
   },
 };

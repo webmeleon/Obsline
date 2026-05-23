@@ -147,12 +147,17 @@ export class OutlineClient {
     }
   }
 
-  async moveDocument(id: string, collectionId: string, parentDocumentId?: string): Promise<void> {
+  async moveDocument(id: string, collectionId: string, parentDocumentId?: string): Promise<OutlineDocument | undefined> {
     try {
       const payload: Record<string, unknown> = { id, collectionId };
       if (parentDocumentId) payload.parentDocumentId = parentDocumentId;
-      await this.client.post('/documents.move', payload);
+      // documents.move returns { data: { documents: [...affected docs...] } }
+      const response = await this.client.post<{ data: { documents?: Array<Partial<OutlineDocument> & { id: string }> } }>(
+        '/documents.move', payload
+      );
       logger.info(`Moved document: ${id} → parent=${parentDocumentId ?? 'root'}`);
+      const moved = response.data.data?.documents?.find(d => d.id === id);
+      return moved ? { ...(moved as OutlineDocument), published: moved.published ?? true } : undefined;
     } catch (error) {
       logger.error(`Failed to move document ${id}: ${error instanceof Error ? error.message : String(error)}`);
       throw error;

@@ -3056,6 +3056,10 @@ function canonicalizeBody(body, resolveId) {
     return key !== void 0 ? `\u27E6att:${key}\u27E7` : m.raw;
   });
 }
+function sanitizeAttachmentFolder(folder) {
+  const clean = (folder || "").split("/").map((s) => s.trim().replace(/^\.+/, "")).filter(Boolean).join("/");
+  return clean || "attachments";
+}
 
 // src/sync-engine.ts
 var CONTENT_TYPE_EXT = {
@@ -3937,7 +3941,7 @@ var SyncEngine = class {
   }
   /** Pick a collision-free vault path for a pulled attachment (reuses the mapped path on re-pull). */
   allocateAttachmentPath(id, alias, contentType) {
-    const folder = (this.settings.attachmentFolder || "attachments").replace(/\/+$/, "");
+    const folder = sanitizeAttachmentFolder(this.settings.attachmentFolder);
     const { base, ext } = this.attachmentNameParts(id, alias, contentType);
     const att = this.settings.syncState.attachments;
     for (let i = 0; ; i++) {
@@ -4043,12 +4047,21 @@ var ObslineSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Attachment folder").setDesc("Vault-relative folder where attachments pulled from Outline are stored.").addText(
-      (text) => text.setPlaceholder("attachments").setValue(this.plugin.settings.attachmentFolder).onChange(async (value) => {
+    new import_obsidian3.Setting(containerEl).setName("Attachment folder").setDesc("Vault-relative folder where attachments pulled from Outline are stored. Avoid dot-folders \u2014 Obsidian hides them and embeds won't render.").addText((text) => {
+      text.setPlaceholder("attachments").setValue(this.plugin.settings.attachmentFolder).onChange(async (value) => {
         this.plugin.settings.attachmentFolder = value.trim().replace(/\/+$/, "") || "attachments";
         await this.plugin.saveSettings();
-      })
-    );
+      });
+      text.inputEl.addEventListener("blur", async () => {
+        const clean = sanitizeAttachmentFolder(this.plugin.settings.attachmentFolder);
+        if (clean !== this.plugin.settings.attachmentFolder) {
+          this.plugin.settings.attachmentFolder = clean;
+          text.setValue(clean);
+          await this.plugin.saveSettings();
+          new import_obsidian3.Notice("Obsidian blendet Ordner mit f\xFChrendem Punkt aus \u2014 der Punkt wurde entfernt.");
+        }
+      });
+    });
     new import_obsidian3.Setting(containerEl).setName("Clean up orphaned attachments").setDesc("When enabled, delete attachments in Outline that no synced document references anymore. Off by default \u2014 deletions are irreversible.").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.cleanupOrphanAttachments).onChange(async (value) => {
         this.plugin.settings.cleanupOrphanAttachments = value;

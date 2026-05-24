@@ -1,6 +1,7 @@
 import { App, PluginSettingTab, Setting, Notice, Modal } from 'obsidian';
 import type ObslinePlugin from './main';
 import { ConflictResolution, InitialSyncDirection } from './types';
+import { sanitizeAttachmentFolder } from './embeds';
 
 export class ObslineSettingTab extends PluginSettingTab {
   plugin: ObslinePlugin;
@@ -169,16 +170,27 @@ export class ObslineSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Attachment folder')
-      .setDesc('Vault-relative folder where attachments pulled from Outline are stored.')
-      .addText(text =>
+      .setDesc('Vault-relative folder where attachments pulled from Outline are stored. ' +
+        'Avoid dot-folders — Obsidian hides them and embeds won\'t render.')
+      .addText(text => {
         text
           .setPlaceholder('attachments')
           .setValue(this.plugin.settings.attachmentFolder)
           .onChange(async value => {
             this.plugin.settings.attachmentFolder = value.trim().replace(/\/+$/, '') || 'attachments';
             await this.plugin.saveSettings();
-          }),
-      );
+          });
+        // Normalise on blur (not per keystroke): strip leading dots so the folder stays visible to Obsidian.
+        text.inputEl.addEventListener('blur', async () => {
+          const clean = sanitizeAttachmentFolder(this.plugin.settings.attachmentFolder);
+          if (clean !== this.plugin.settings.attachmentFolder) {
+            this.plugin.settings.attachmentFolder = clean;
+            text.setValue(clean);
+            await this.plugin.saveSettings();
+            new Notice('Obsidian blendet Ordner mit führendem Punkt aus — der Punkt wurde entfernt.');
+          }
+        });
+      });
 
     new Setting(containerEl)
       .setName('Clean up orphaned attachments')

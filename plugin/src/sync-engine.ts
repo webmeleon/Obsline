@@ -1,6 +1,6 @@
 import { App, TFile } from 'obsidian';
 import { OutlineClient } from './outline-client';
-import { canonicalizeBody, classifyTarget, replaceEmbedsAsync, parseEmbeds } from './embeds';
+import { canonicalizeBody, classifyTarget, replaceEmbedsAsync, parseEmbeds, sanitizeAttachmentFolder } from './embeds';
 import {
   ObslineSettings,
   OutlineCollection,
@@ -1055,7 +1055,7 @@ export class SyncEngine {
 
   /** Pick a collision-free vault path for a pulled attachment (reuses the mapped path on re-pull). */
   private allocateAttachmentPath(id: string, alias: string, contentType?: string): string {
-    const folder = (this.settings.attachmentFolder || 'attachments').replace(/\/+$/, '');
+    const folder = sanitizeAttachmentFolder(this.settings.attachmentFolder);
     const { base, ext } = this.attachmentNameParts(id, alias, contentType);
     const att = this.settings.syncState.attachments;
     for (let i = 0; ; i++) {

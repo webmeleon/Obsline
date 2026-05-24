@@ -5,6 +5,7 @@ import {
   fileExtension,
   canonicalizeBody,
   replaceEmbeds,
+  sanitizeAttachmentFolder,
   type EmbedTarget,
 } from '../src/core/embeds';
 
@@ -132,5 +133,33 @@ describe('embeds: replaceEmbeds', () => {
   test('rebuilds body preserving non-embed text', () => {
     const out = replaceEmbeds('a ![[x.png]] b ![[y.pdf]] c', () => 'Z');
     expect(out).toBe('a Z b Z c');
+  });
+});
+
+describe('embeds: sanitizeAttachmentFolder', () => {
+  test('strips a leading dot (Obsidian hides dot-folders)', () => {
+    expect(sanitizeAttachmentFolder('.attachments')).toBe('attachments');
+    expect(sanitizeAttachmentFolder('..hidden')).toBe('hidden');
+  });
+
+  test('strips leading dots per path segment', () => {
+    expect(sanitizeAttachmentFolder('assets/.imgs')).toBe('assets/imgs');
+    expect(sanitizeAttachmentFolder('.a/.b')).toBe('a/b');
+  });
+
+  test('trims trailing slashes and empty segments', () => {
+    expect(sanitizeAttachmentFolder('attachments/')).toBe('attachments');
+    expect(sanitizeAttachmentFolder('a//b/')).toBe('a/b');
+  });
+
+  test('keeps normal folders untouched', () => {
+    expect(sanitizeAttachmentFolder('attachments')).toBe('attachments');
+    expect(sanitizeAttachmentFolder('assets/images')).toBe('assets/images');
+  });
+
+  test('falls back to "attachments" for empty/dot-only input', () => {
+    expect(sanitizeAttachmentFolder('')).toBe('attachments');
+    expect(sanitizeAttachmentFolder('.')).toBe('attachments');
+    expect(sanitizeAttachmentFolder('  ')).toBe('attachments');
   });
 });

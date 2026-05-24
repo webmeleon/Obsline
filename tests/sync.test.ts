@@ -1169,6 +1169,23 @@ describe('SyncEngine idempotency', () => {
     expect(store.client.downloadAttachment).not.toHaveBeenCalled(); // no re-download
   });
 
+  test('dot-prefixed attachment folder is sanitised (Obsidian hides dot-folders)', async () => {
+    config.attachmentFolder = '.attachments'; // would be invisible to Obsidian
+    const store = makeOutlineStore();
+    const vault = makeVaultStore();
+    seedDocWithAttachment(store, {
+      text: '![pic](/api/attachments.redirect?id=att-7)',
+      attId: 'att-7', data: 'D', ct: 'image/png',
+    });
+    const engine = wire(store, vault);
+
+    await engine.sync();
+    const binPath = [...vault.binaries.keys()][0];
+    expect(binPath.startsWith('attachments/')).toBe(true);   // dot stripped
+    expect(binPath.startsWith('.attachments/')).toBe(false);
+    expect(vault.files.get('ToDo/WithImage.md')).not.toContain('.attachments/');
+  });
+
   test('attachment doc: Outline bumps updatedAt but content identical → canonical no-op', async () => {
     const store = makeOutlineStore();
     const vault = makeVaultStore();

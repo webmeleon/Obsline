@@ -5,7 +5,7 @@ import { ObsidianReader, ObsidianNote } from './obsidian';
 import { OutlineClient, OutlineDocument, OutlineCollection } from './outline';
 import { ObslineConfig } from '../utils/config';
 import { Logger } from '../utils/logger';
-import { canonicalizeBody, classifyTarget, replaceEmbedsAsync, parseEmbeds } from './embeds';
+import { canonicalizeBody, classifyTarget, replaceEmbedsAsync, parseEmbeds, sanitizeAttachmentFolder } from './embeds';
 
 interface AttachmentState {
   idToPath: Record<string, string>;  // outline attachmentId → vault-relative attachment path
@@ -941,7 +941,7 @@ export class SyncEngine {
 
   /** Pick a collision-free vault path for a pulled attachment (reuses the mapped path on re-pull). */
   private async allocateAttachmentPath(id: string, alias: string, contentType?: string): Promise<string> {
-    const folder = (this.config.attachmentFolder || 'attachments').replace(/\/+$/, '');
+    const folder = sanitizeAttachmentFolder(this.config.attachmentFolder);
     const { base, ext } = this.attachmentNameParts(id, alias, contentType);
     for (let i = 0; ; i++) {
       const name = i === 0 ? `${base}.${ext}` : `${base}-${i}.${ext}`;

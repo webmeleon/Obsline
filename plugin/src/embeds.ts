@@ -154,3 +154,17 @@ export function canonicalizeBody(
     return key !== undefined ? `⟦att:${key}⟧` : m.raw;
   });
 }
+
+/**
+ * Normalise an attachment-folder setting. Obsidian excludes dot-folders from its index,
+ * so embeds pointing into them never render — strip a leading dot from each path segment,
+ * drop empty/trailing segments, and fall back to "attachments".
+ */
+export function sanitizeAttachmentFolder(folder: string): string {
+  const clean = (folder || '')
+    .split('/')
+    .map(s => s.trim().replace(/^\.+/, ''))
+    .filter(Boolean)
+    .join('/');
+  return clean || 'attachments';
+}
